@@ -39,6 +39,7 @@ from PyQt5.QtCore import (
 from PyQt5.QtGui import QCursor, QImage, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -151,6 +152,7 @@ def load_config() -> dict:
         "quality": "192",
         "extended_mix": False,
         "max_extended_minutes": 20,
+        "artist_first": False,
     }
     try:
         with open(_config_path(), encoding="utf-8") as f:
@@ -208,6 +210,7 @@ class MusicScraper(QThread):
         audio_quality: str = "192",
         extended_mix: bool = False,
         max_extended_minutes: int = 20,
+        artist_first: bool = False,
     ):
         super().__init__()
         self.counter = 0  # Initialize counter to zero
@@ -225,6 +228,7 @@ class MusicScraper(QThread):
         except (TypeError, ValueError):
             mem = MusicScraper._DEFAULT_MAX_EXTENDED_MINUTES
         self.max_track_duration_s = max(1, mem) * 60
+        self.artist_first = bool(artist_first)
         self._counter_lock = threading.Lock()
         self._failed_lock = threading.Lock()
         self._filename_lock = threading.Lock()
@@ -268,6 +272,14 @@ class MusicScraper(QThread):
     def sanitize_text(self, text):
         """Sanitize text for filename usage."""
         return sanitize_filename(text, allow_spaces=True)
+
+    def _format_track_filename(self, sanitized_title, sanitized_artists, suffix=""):
+        """Build the .mp3 filename, honoring the artist_first setting."""
+        if self.artist_first:
+            stem = f"{sanitized_artists} - {sanitized_title}"
+        else:
+            stem = f"{sanitized_title} - {sanitized_artists}"
+        return f"{stem}{suffix}.mp3"
 
     def format_playlist_name(self, metadata: PlaylistInfo):
         owner = metadata.owner or "Spotify"
@@ -551,15 +563,19 @@ class MusicScraper(QThread):
         mislabeling it '(Extended Mix)'. Returns (final_path, meta_title)."""
         if not self.extended_mix or used_extended:
             return final_path, display_title
-        # extended mode but fell back to the original -> drop the (Extended Mix) marker
+        # extended mode but fell back to the original -> drop the (Extended Mix) marker.
+        # Build the unmarked name via _format_track_filename so it honors artist_first.
+        sanitized_title = self.sanitize_text(track_title)
         unmarked = os.path.join(
-            folder, f"{self.sanitize_text(track_title)} - {sanitized_artists}.mp3"
+            folder, self._format_track_filename(sanitized_title, sanitized_artists)
         )
         if unmarked != final_path:
             if os.path.exists(unmarked):
                 unmarked = os.path.join(
                     folder,
-                    f"{self.sanitize_text(track_title)} - {sanitized_artists} [{track_id}].mp3",
+                    self._format_track_filename(
+                        sanitized_title, sanitized_artists, suffix=f" [{track_id}]"
+                    ),
                 )
             try:
                 os.rename(final_path, unmarked)
@@ -610,7 +626,7 @@ class MusicScraper(QThread):
         artists = track.artists
         sanitized_title = self.sanitize_text(display_title)
         sanitized_artists = self.sanitize_text(artists)
-        filename = f"{sanitized_title} - {sanitized_artists}.mp3"
+        filename = self._format_track_filename(sanitized_title, sanitized_artists)
         filepath = os.path.join(playlist_folder_path, filename)
 
         # Filename collision guard: two different tracks can sanitize to the
@@ -622,7 +638,9 @@ class MusicScraper(QThread):
             if filepath in self._in_flight_files:
                 filepath = os.path.join(
                     playlist_folder_path,
-                    f"{sanitized_title} - {sanitized_artists} [{track.id}].mp3",
+                    self._format_track_filename(
+                        sanitized_title, sanitized_artists, suffix=f" [{track.id}]"
+                    ),
                 )
             self._in_flight_files.add(filepath)
 
@@ -966,7 +984,7 @@ class MusicScraper(QThread):
         artists = track.artists
         sanitized_title = self.sanitize_text(display_title)
         sanitized_artists = self.sanitize_text(artists)
-        filename = f"{sanitized_title} - {sanitized_artists}.mp3"
+        filename = self._format_track_filename(sanitized_title, sanitized_artists)
         filepath = os.path.join(music_folder, filename)
 
         album_name = track.album or ""
@@ -1055,6 +1073,7 @@ class ScraperThread(QThread):
         audio_quality: str = "192",
         extended_mix: bool = False,
         max_extended_minutes: int = 20,
+        artist_first: bool = False,
     ):
         super().__init__()
         self.spotify_link = spotify_link
@@ -1066,6 +1085,7 @@ class ScraperThread(QThread):
             audio_quality=audio_quality,
             extended_mix=extended_mix,
             max_extended_minutes=max_extended_minutes,
+            artist_first=artist_first,
         )
 
     def request_cancel(self):
@@ -1278,6 +1298,9 @@ class SettingsDialog(QDialog):
             int(self._config.get("max_extended_minutes", 20))
         )
 
+        self._artist_first_cb = QCheckBox("Name files as 'Artist - Track'")
+        self._artist_first_cb.setChecked(bool(self._config.get("artist_first", False)))
+
         form = QFormLayout()
         form.addRow("Download folder:", folder_row)
         form.addRow("Audio format:", self._format_cb)
@@ -1286,6 +1309,7 @@ class SettingsDialog(QDialog):
         form.addRow(
             "Max extended-mix length (minutes):", self._max_extended_minutes_spin
         )
+        form.addRow("Filename order:", self._artist_first_cb)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(self.accept)
@@ -1331,6 +1355,7 @@ class SettingsDialog(QDialog):
         self._config["quality"] = self._quality_cb.currentText().split()[0]
         self._config["extended_mix"] = self._extended_mix_cb.isChecked()
         self._config["max_extended_minutes"] = self._max_extended_minutes_spin.value()
+        self._config["artist_first"] = self._artist_first_cb.isChecked()
         return self._config
 
 
@@ -1494,6 +1519,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 audio_quality=self._config.get("quality", "192"),
                 extended_mix=bool(self._config.get("extended_mix", False)),
                 max_extended_minutes=self._config.get("max_extended_minutes", 20),
+                artist_first=self._config.get("artist_first", False),
             )
             self.scraper_thread.progress_update.connect(self.update_progress)
             self.scraper_thread.finished.connect(self.thread_finished)
