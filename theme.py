@@ -113,6 +113,42 @@ QLineEdit#PlaylistLink:focus {{
     border: 1px solid {COLORS["focus"]};
 }}
 
+/* Multi-playlist queue dialog: paste box + queue list */
+QPlainTextEdit {{
+    background-color: {COLORS["input_bg"]};
+    border: 1px solid {COLORS["input_border"]};
+    border-radius: 8px;
+    padding: 6px 8px;
+    font-size: 13px;
+    color: {COLORS["text_primary"]};
+    selection-background-color: {COLORS["accent"]};
+    selection-color: {COLORS["download_text"]};
+}}
+
+QPlainTextEdit:focus {{
+    border: 1px solid {COLORS["focus"]};
+}}
+
+QListWidget {{
+    background-color: {COLORS["input_bg"]};
+    border: 1px solid {COLORS["input_border"]};
+    border-radius: 8px;
+    padding: 4px;
+    font-size: 13px;
+    color: {COLORS["text_primary"]};
+    outline: none;
+}}
+
+QListWidget::item {{
+    padding: 6px 8px;
+    border-radius: 6px;
+}}
+
+QListWidget::item:selected {{
+    background-color: {COLORS["hover"]};
+    color: {COLORS["text_primary"]};
+}}
+
 QPushButton#DownloadBtn {{
     background-color: {COLORS["accent"]};
     color: {COLORS["download_text"]};
@@ -136,6 +172,31 @@ QPushButton#DownloadBtn:pressed {{
 QPushButton#DownloadBtn:disabled {{
     background-color: {COLORS["input_border"]};
     color: {COLORS["text_tertiary"]};
+}}
+
+QPushButton#QueueBtn {{
+    background-color: {COLORS["input_bg"]};
+    color: {COLORS["text_primary"]};
+    border: 1px solid {COLORS["input_border"]};
+    border-radius: 20px;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 8px 20px;
+    min-height: 36px;
+}}
+
+QPushButton#QueueBtn:hover {{
+    background-color: {COLORS["hover"]};
+    border-color: {COLORS["accent"]};
+}}
+
+QPushButton#QueueBtn:pressed {{
+    background-color: {COLORS["input_border"]};
+}}
+
+QPushButton#QueueBtn:disabled {{
+    color: {COLORS["text_tertiary"]};
+    border-color: {COLORS["input_border"]};
 }}
 
 QPushButton#SettingsBtn {{

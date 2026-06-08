@@ -18,6 +18,7 @@ For the program to work, the playlist URL pattern must follow the format of
 __version__ = "2.0.7"
 
 import concurrent.futures
+import contextlib
 import os
 import re
 import sys
@@ -31,11 +32,13 @@ from PyQt5.QtCore import (
     QEasingCurve,
     QPropertyAnimation,
     QSize,
+    Qt,
     QThread,
+    QTimer,
     pyqtSignal,
     pyqtSlot,
 )
-from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtGui import QCursor, QImage, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -46,13 +49,28 @@ from PyQt5.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
 )
 from yt_dlp import YoutubeDL
 
+import theme
+from download_queue import (
+    ACTIVE,
+    CANCELLED,
+    DONE,
+    FAILED,
+    PARTIAL,
+    PENDING,
+    DownloadQueue,
+    classify_completion,
+    parse_playlist_urls,
+)
 from spotifydown_api import (
     ExtractionError,
     NetworkError,
@@ -64,7 +82,6 @@ from spotifydown_api import (
     extract_playlist_id,
     sanitize_filename,
 )
-import theme
 from Template import Ui_MainWindow
 
 
@@ -427,9 +444,7 @@ class MusicScraper(QThread):
                     if self._extended_title_boost(e) and lo <= e["duration"] <= upper
                 ]
                 if near:
-                    chosen = min(
-                        near, key=lambda e: abs(e["duration"] - expected_duration_s)
-                    )
+                    chosen = min(near, key=lambda e: abs(e["duration"] - expected_duration_s))
                     return f"https://www.youtube.com/watch?v={chosen['id']}"
                 return None
             else:
@@ -439,8 +454,7 @@ class MusicScraper(QThread):
                 sane_kw = [
                     e
                     for e in timed
-                    if self._extended_title_boost(e)
-                    and e["duration"] <= self.max_track_duration_s
+                    if self._extended_title_boost(e) and e["duration"] <= self.max_track_duration_s
                 ]
                 if sane_kw:
                     chosen = sane_kw[0]
@@ -457,9 +471,7 @@ class MusicScraper(QThread):
                 if top_off:
                     timed = [e for e in entries if e.get("duration")]
                     if timed:
-                        chosen = min(
-                            timed, key=lambda e: abs(e["duration"] - expected_duration_s)
-                        )
+                        chosen = min(timed, key=lambda e: abs(e["duration"] - expected_duration_s))
         return f"https://www.youtube.com/watch?v={chosen['id']}"
 
     def _build_youtube_download_plan(self, search_query, fallback_query=None):
@@ -530,9 +542,7 @@ class MusicScraper(QThread):
         # file landed on disk, so a search with no playable source fails loudly
         # instead of silently reporting a path that does not exist.
         for query, pe in self._build_youtube_download_plan(search_query, fallback_query):
-            video_url = self._select_youtube_match(
-                query, expected_duration_s, prefer_extended=pe
-            )
+            video_url = self._select_youtube_match(query, expected_duration_s, prefer_extended=pe)
             if not video_url:
                 continue
             try:
@@ -702,9 +712,7 @@ class MusicScraper(QThread):
             expected_dur = (track.duration_ms / 1000) if track.duration_ms else None
             try:
                 if self.extended_mix:
-                    search_query = (
-                        f"ytsearch10:{track_title} {artists} extended mix audio"
-                    )
+                    search_query = f"ytsearch10:{track_title} {artists} extended mix audio"
                     final_path, used_extended = self.download_track_audio(
                         search_query,
                         filepath,
@@ -1062,6 +1070,12 @@ class MusicScraper(QThread):
 # Scraper Thread
 class ScraperThread(QThread):
     progress_update = pyqtSignal(str)
+    # Terminal outcome of THIS download: (status, message) where status is one
+    # of download_queue.{DONE,FAILED,CANCELLED,PARTIAL}. The queue controller
+    # keys an item's result off this — never off QThread.finished (which always
+    # fires, even when run() swallowed an exception) nor off error_signal
+    # (which carries non-fatal per-track notices).
+    item_finished = pyqtSignal(str, str)
 
     def __init__(
         self,
@@ -1079,6 +1093,7 @@ class ScraperThread(QThread):
         self.spotify_link = spotify_link
         self.music_folder = music_folder or os.path.join(os.getcwd(), "music")
         self._cancel_event = cancel_event or threading.Event()
+        self._last_message = ""
         self.scraper = MusicScraper(
             cancel_event=self._cancel_event,
             audio_format=audio_format,
@@ -1087,10 +1102,18 @@ class ScraperThread(QThread):
             max_extended_minutes=max_extended_minutes,
             artist_first=artist_first,
         )
+        # Capture the terminal status string synchronously IN the worker thread.
+        # PlaylistCompleted is emitted from run()'s thread; a DirectConnection
+        # slot runs in that same thread, so self._last_message is set before
+        # scrape_*() returns (a queued connection could land after run() ends).
+        self.scraper.PlaylistCompleted.connect(self._record_completion, Qt.DirectConnection)
 
     def request_cancel(self):
         """Request cancellation of the download."""
         self._cancel_event.set()
+
+    def _record_completion(self, message):
+        self._last_message = message
 
     def run(self):
         self.progress_update.emit("Scraping started...")
@@ -1102,8 +1125,14 @@ class ScraperThread(QThread):
             else:
                 self.scraper.scrape_playlist(self.spotify_link, self.music_folder)
             self.progress_update.emit("Scraping completed.")
+            status = classify_completion(self._last_message, self._cancel_event.is_set())
         except Exception as e:
+            # run() must never raise out of a QThread; a swallowed exception is
+            # a failed item (unless the user cancelled).
             self.progress_update.emit(f"{e}")
+            self._last_message = str(e)
+            status = CANCELLED if self._cancel_event.is_set() else FAILED
+        self.item_finished.emit(status, self._last_message)
 
 
 def _fetch_cover_bytes(url: str) -> bytes | None:
@@ -1257,7 +1286,7 @@ class SettingsDialog(QDialog):
         self.resize(620, self.sizeHint().height())
         self._config = dict(config)
 
-        from PyQt5.QtWidgets import QCheckBox, QLineEdit, QSpinBox
+        from PyQt5.QtWidgets import QLineEdit, QSpinBox
 
         # QLineEdit (read-only) handles arbitrarily long paths cleanly: it
         # elides mid-path with horizontal scroll on focus, rather than
@@ -1299,9 +1328,7 @@ class SettingsDialog(QDialog):
 
         self._max_extended_minutes_spin = QSpinBox()
         self._max_extended_minutes_spin.setRange(1, 180)
-        self._max_extended_minutes_spin.setValue(
-            int(self._config.get("max_extended_minutes", 20))
-        )
+        self._max_extended_minutes_spin.setValue(int(self._config.get("max_extended_minutes", 20)))
 
         self._artist_first_cb = QCheckBox("Name files as 'Artist - Track'")
         self._artist_first_cb.setChecked(bool(self._config.get("artist_first", False)))
@@ -1311,9 +1338,7 @@ class SettingsDialog(QDialog):
         form.addRow("Audio format:", self._format_cb)
         form.addRow("Audio quality:", self._quality_cb)
         form.addRow("Extended mix:", self._extended_mix_cb)
-        form.addRow(
-            "Max extended-mix length (minutes):", self._max_extended_minutes_spin
-        )
+        form.addRow("Max extended-mix length (minutes):", self._max_extended_minutes_spin)
         form.addRow("Filename order:", self._artist_first_cb)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -1372,6 +1397,118 @@ class SettingsDialog(QDialog):
         return self._config
 
 
+class QueueDialog(QDialog):
+    """Non-modal panel to paste many Spotify URLs and watch them download.
+
+    Built programmatically with real layouts (not via the pyuic-generated
+    Template.py), so it sits cleanly alongside the modernized main window. It
+    holds NO download logic: it parses / queues / starts / stops / clears
+    through the controller (MainWindow) and re-renders its list from the
+    controller's DownloadQueue snapshot whenever the controller asks it to.
+    """
+
+    _STATUS_ICON = {
+        PENDING: "•",
+        ACTIVE: "⬇",
+        DONE: "✅",
+        FAILED: "❌",
+        CANCELLED: "⏹",
+        PARTIAL: "⚠",
+    }
+
+    def __init__(self, controller):
+        super().__init__(controller)
+        self._controller = controller
+        self.setWindowTitle("Download Queue")
+        # Qt.Tool keeps the panel floating above the main window and out of the
+        # taskbar; it stays recoverable rather than getting lost behind it.
+        self.setWindowFlags(Qt.Tool)
+        self.setMinimumSize(460, 440)
+
+        intro = QLabel(
+            "Paste Spotify playlist / album / track URLs — one per line "
+            "(spaces and commas work too). Playlists and albums each download "
+            "into their own folder; loose tracks share the base folder."
+        )
+        intro.setWordWrap(True)
+
+        self._paste = QPlainTextEdit()
+        self._paste.setPlaceholderText(
+            "https://open.spotify.com/playlist/...\n"
+            "https://open.spotify.com/album/...\n"
+            "https://open.spotify.com/track/..."
+        )
+        self._paste.setMinimumHeight(90)
+
+        self._add_btn = QPushButton("Add to queue")
+        self._add_btn.clicked.connect(self._on_add)
+        add_row = QHBoxLayout()
+        add_row.addStretch(1)
+        add_row.addWidget(self._add_btn)
+
+        self._list = QListWidget()
+
+        self._start_btn = QPushButton("Start")
+        self._start_btn.clicked.connect(lambda: self._controller.start_queue())
+        self._stop_btn = QPushButton("Stop")
+        self._stop_btn.clicked.connect(lambda: self._controller.stop_queue())
+        self._stop_btn.setEnabled(False)
+        self._clear_btn = QPushButton("Clear")
+        self._clear_btn.clicked.connect(lambda: self._controller.clear_queue())
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(self._start_btn)
+        btn_row.addWidget(self._stop_btn)
+        btn_row.addStretch(1)
+        btn_row.addWidget(self._clear_btn)
+
+        self._summary = QLabel("")
+        self._summary.setWordWrap(True)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(intro)
+        layout.addWidget(self._paste)
+        layout.addLayout(add_row)
+        layout.addWidget(self._list, 1)
+        layout.addWidget(self._summary)
+        layout.addLayout(btn_row)
+
+    def _on_add(self):
+        added, skipped = self._controller.queue_add_text(self._paste.toPlainText())
+        if added:
+            self._paste.clear()
+        parts = [f"Added {added}"]
+        if skipped:
+            parts.append(f"skipped {skipped} invalid")
+        self._summary.setText(", ".join(parts))
+
+    # ---- driven by the controller to reflect queue state ----
+    def refresh(self, items):
+        """Rebuild the list from a DownloadQueue snapshot (id-addressed, so a
+        full rebuild can never update the wrong row)."""
+        self._list.clear()
+        for it in items:
+            icon = self._STATUS_ICON.get(it.status, "•")
+            QListWidgetItem(f"{icon}   {it.display_name}    ·  {it.kind}", self._list)
+
+    def set_running(self, running):
+        self._start_btn.setEnabled(not running)
+        self._stop_btn.setEnabled(running)
+        self._clear_btn.setEnabled(not running)
+        self._add_btn.setEnabled(not running)
+
+    def set_summary(self, text):
+        self._summary.setText(text)
+
+    def closeEvent(self, event):
+        # Never destroy the dialog while a queue is running — its slots still
+        # write to these widgets. Hide instead; MainWindow keeps a strong ref.
+        if self._controller.queue_is_running():
+            event.ignore()
+            self.hide()
+        else:
+            super().closeEvent(event)
+
+
 # Main Window
 class MainWindow(QMainWindow, Ui_MainWindow):
     def __init__(self):
@@ -1384,8 +1521,21 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.download_path = self._config.get("download_path") or self._get_default_download_path()
         self._download_path_set = bool(self._config.get("download_path"))
         self._active_threads = []  # Keep references to running threads to prevent GC crashes
-        self._is_downloading = False  # Track download state for stop button
-        self._cancel_event = threading.Event()  # Event for cooperative thread cancellation
+        # Download lifecycle: "idle" | "single" | "queue" | "stopping". Replaces
+        # the old single _is_downloading bool so the single-URL flow and the
+        # multi-item queue can't clobber each other's button / cancel state.
+        self._mode = "idle"
+        # While _mode == "stopping", records what we're stopping ("single" or
+        # "queue") so queue_is_running() and the Download/Stop button don't
+        # confuse a single-download stop with a queue stop.
+        self._stopping_from = None
+        self._cancel_event = threading.Event()  # Cooperative cancel for the active thread
+        self.scraper_thread = None
+
+        # Multi-playlist queue: paste many URLs, download them sequentially.
+        self._queue = DownloadQueue()
+        self._queue_halted = False  # set by Stop so the finished handler won't auto-advance
+        self.queue_dialog = None
 
         self._panel_open_width = 340
         self._panel_height = 480
@@ -1399,6 +1549,16 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
         self.Select_Home.clicked.connect(self.Linkedin)
         self.SettingsBtn.clicked.connect(self.open_settings)
+
+        # Queue button: opens the non-modal multi-playlist panel. Added into the
+        # frame's layout (right under the URL row) rather than the generated
+        # Template.py, so it flows with the modernized layout-managed UI.
+        self.QueueBtn = QPushButton("⬇  Download Queue")
+        self.QueueBtn.setObjectName("QueueBtn")
+        self.QueueBtn.setMinimumHeight(34)
+        self.QueueBtn.setCursor(QCursor(Qt.PointingHandCursor))
+        self.QueueBtn.clicked.connect(self.open_queue_dialog)
+        self._insert_queue_button()
 
         # Hide the Album row in the preview panel: Spotify's unauthenticated
         # embed endpoints do not expose album name anywhere we can reach it,
@@ -1488,32 +1648,17 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             if new.get("download_path"):
                 self.download_path = new["download_path"]
                 self._download_path_set = True
-            self._config = self._merge_dialog_settings(
-                self._config, new, self.download_path
-            )
+            self._config = self._merge_dialog_settings(self._config, new, self.download_path)
             save_config(self._config)
             self.statusMsg.setText("Settings saved")
 
-    @pyqtSlot()
-    def on_returnButton(self):
-        # If already downloading, stop the download
-        if self._is_downloading:
-            self._stop_download()
-            return
-
-        spotify_url = self.PlaylistLink.text().strip()
-        if not spotify_url:
-            self.statusMsg.setText("Please enter a Spotify URL")
-            return
-
-        # ALWAYS prompt for download location on first download
+    def _ensure_ready_to_download(self):
+        """Prompt for / validate the download folder. Returns True if usable."""
         if not self._download_path_set:
             self.statusMsg.setText("Select download location...")
             if not self._prompt_download_location():
                 self.statusMsg.setText("Download cancelled - no folder selected")
-                return
-
-        # Verify the selected path is still writable
+                return False
         if not self._ensure_download_path():
             self.statusMsg.setText("Cannot write to download folder")
             QMessageBox.warning(
@@ -1522,69 +1667,300 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                 f"Cannot write to:\n{self.download_path}\n\nPlease select a different folder.",
             )
             if not self._prompt_download_location():
-                return
+                return False
+        return True
+
+    def _start_scraper(self, url, cancel_event, on_item_finished, item_id=None):
+        """Build, wire and start ONE ScraperThread. Shared by the single-URL
+        flow and each queue item (so both honor the same format/quality/extended
+        settings). ``on_item_finished(status, message)`` is the authoritative
+        terminal callback; thread teardown happens in _cleanup_scraper_thread."""
+        thread = ScraperThread(
+            url,
+            self.download_path,
+            cancel_event=cancel_event,
+            audio_format=self._config.get("format", "mp3"),
+            audio_quality=self._config.get("quality", "192"),
+            extended_mix=bool(self._config.get("extended_mix", False)),
+            max_extended_minutes=self._config.get("max_extended_minutes", 20),
+            artist_first=self._config.get("artist_first", False),
+        )
+        self.scraper_thread = thread
+        self._active_threads.append(thread)  # strong ref until fully finished
+
+        s = thread.scraper
+        thread.progress_update.connect(self.update_progress)
+        s.song_meta.connect(self.update_song_META)
+        s.add_song_meta.connect(self.add_song_META)
+        s.dlprogress_signal.connect(self.update_song_progress)
+        s.Resetprogress_signal.connect(self.Reset_song_progress)
+        s.count_updated.connect(self.update_counter)
+        s.song_Album.connect(self.update_AlbumName)
+        # error_signal + PlaylistCompleted carry transient/terminal TEXT only;
+        # the authoritative item outcome is item_finished, never these.
+        s.error_signal.connect(self.update_progress)
+        s.PlaylistCompleted.connect(self.update_progress)
+
+        if item_id is not None:
+            # Also keep this queue item's row label in sync. song_Album carries
+            # the playlist/album name; for a track it emits "Single Track
+            # Download", so track names come from song_meta instead.
+            s.song_Album.connect(
+                lambda name, iid=item_id: self._set_queue_item_name(iid, name, "album")
+            )
+            s.song_meta.connect(
+                lambda meta, iid=item_id: self._set_queue_item_name(
+                    iid, meta.get("title", ""), "track"
+                )
+            )
+
+        thread.item_finished.connect(on_item_finished)
+        thread.finished.connect(lambda t=thread: self._cleanup_scraper_thread(t))
+        thread.start()
+
+    def _cleanup_scraper_thread(self, thread):
+        """Disconnect a finished thread's signals and release it. Disconnecting
+        here (rather than relying on deleteLater, which is deferred) stops any
+        late queued signals from the old scraper landing on the next item."""
+        with contextlib.suppress(TypeError, RuntimeError):
+            thread.scraper.disconnect()
+        with contextlib.suppress(TypeError, RuntimeError):
+            thread.disconnect()
+        if thread in self._active_threads:
+            self._active_threads.remove(thread)
+        # Drop the dangling reference so nothing dereferences a deleted QObject.
+        if self.scraper_thread is thread:
+            self.scraper_thread = None
+        thread.deleteLater()
+
+    @pyqtSlot()
+    def on_returnButton(self):
+        # The main Download button doubles as a stop control while busy. Route
+        # by the real lifecycle so a single-download stop and a queue stop never
+        # cross over (and an accidental Enter during "stopping" is harmless).
+        if self.queue_is_running():
+            self.stop_queue()
+            return
+        if self._mode in ("single", "stopping"):
+            self._stop_download()
+            return
+
+        spotify_url = self.PlaylistLink.text().strip()
+        if not spotify_url:
+            self.statusMsg.setText("Please enter a Spotify URL")
+            return
+
+        if not self._ensure_ready_to_download():
+            return
 
         try:
-            # Validate URL type
             url_type, _ = detect_spotify_url_type(spotify_url)
-            self.statusMsg.setText(f"Detected: {url_type}")
-
-            # Reset cancel event and set downloading state
-            self._cancel_event = threading.Event()
-            self._is_downloading = True
-            self.DownloadBtn.setText("Stop")
-
-            self.scraper_thread = ScraperThread(
-                spotify_url,
-                self.download_path,
-                cancel_event=self._cancel_event,
-                audio_format=self._config.get("format", "mp3"),
-                audio_quality=self._config.get("quality", "192"),
-                extended_mix=bool(self._config.get("extended_mix", False)),
-                max_extended_minutes=self._config.get("max_extended_minutes", 20),
-                artist_first=self._config.get("artist_first", False),
-            )
-            self.scraper_thread.progress_update.connect(self.update_progress)
-            self.scraper_thread.finished.connect(self.thread_finished)
-            self.scraper_thread.scraper.song_Album.connect(self.update_AlbumName)
-            self.scraper_thread.scraper.song_meta.connect(self.update_song_META)
-            self.scraper_thread.scraper.add_song_meta.connect(self.add_song_META)
-            self.scraper_thread.scraper.dlprogress_signal.connect(self.update_song_progress)
-            self.scraper_thread.scraper.Resetprogress_signal.connect(self.Reset_song_progress)
-            self.scraper_thread.scraper.PlaylistCompleted.connect(
-                lambda x: self.statusMsg.setText(x)
-            )
-            self.scraper_thread.scraper.error_signal.connect(lambda x: self.statusMsg.setText(x))
-
-            # Connect the count_updated signal to the update_counter slot
-            self.scraper_thread.scraper.count_updated.connect(self.update_counter)
-
-            self.scraper_thread.start()
-
         except ValueError as e:
             self.statusMsg.setText(str(e))
-            self._is_downloading = False
-            self.DownloadBtn.setText("Download")
+            return
 
-    def _stop_download(self):
-        """Stop the current download gracefully using cooperative cancellation."""
-        self.statusMsg.setText("Stopping download...")
-        self.DownloadBtn.setEnabled(False)
+        self.statusMsg.setText(f"Detected: {url_type}")
+        self._mode = "single"
+        self.DownloadBtn.setText("Stop")
+        self.DownloadBtn.setEnabled(True)
+        self._cancel_event = threading.Event()
+        self._start_scraper(
+            spotify_url,
+            self._cancel_event,
+            on_item_finished=lambda status, msg: self._on_single_finished(status, msg),
+        )
 
-        # Signal cancellation via event (thread checks this periodically)
-        self._cancel_event.set()
-
-        if hasattr(self, "scraper_thread") and self.scraper_thread.isRunning():
-            self.scraper_thread.request_cancel()
-            # Thread will finish current track and exit; UI resets via thread_finished signal
-
-    def thread_finished(self):
-        """Reset UI state when download thread finishes."""
-        self._is_downloading = False
+    def _on_single_finished(self, status, message):
+        """Reset UI after a single (non-queue) download finishes. The terminal
+        text is already shown via PlaylistCompleted/error_signal."""
+        self._mode = "idle"
+        self._stopping_from = None
         self.DownloadBtn.setText("Download")
         self.DownloadBtn.setEnabled(True)
-        if hasattr(self, "scraper_thread"):
-            self.scraper_thread.deleteLater()  # Clean up the thread properly
+
+    def _stop_download(self):
+        """Stop the current single download via cooperative cancellation."""
+        self.statusMsg.setText("Stopping download...")
+        self.DownloadBtn.setEnabled(False)
+        self._mode = "stopping"
+        self._stopping_from = "single"
+        self._cancel_event.set()
+        if self.scraper_thread is not None and self.scraper_thread.isRunning():
+            self.scraper_thread.request_cancel()
+        # UI resets when item_finished -> _on_single_finished fires.
+
+    # ---------------------------------------------------------------- queue ---
+    def _insert_queue_button(self):
+        """Place the Queue button in the frame layout, just under the URL row."""
+        layout = getattr(self, "frameLayout", None)
+        if layout is None:
+            return
+        insert_at = layout.count()
+        for i in range(layout.count()):
+            if layout.itemAt(i).layout() is getattr(self, "urlRow", None):
+                insert_at = i + 1
+                break
+        layout.insertWidget(insert_at, self.QueueBtn)
+
+    def open_queue_dialog(self):
+        """Show the non-modal multi-playlist queue panel (created lazily)."""
+        if self.queue_dialog is None:
+            self.queue_dialog = QueueDialog(self)
+        self._refresh_queue_dialog()
+        self.queue_dialog.set_running(self.queue_is_running())
+        self.queue_dialog.show()
+        self.queue_dialog.raise_()
+        self.queue_dialog.activateWindow()
+
+    def queue_is_running(self):
+        # A single-download stop also enters "stopping"; only report the queue
+        # as running when the queue itself is the thing running/stopping.
+        return self._mode == "queue" or (
+            self._mode == "stopping" and self._stopping_from == "queue"
+        )
+
+    def queue_add_text(self, text):
+        """Parse a paste blob and append valid, de-duplicated URLs to the queue.
+        Returns (n_added, n_skipped)."""
+        parsed, skipped = parse_playlist_urls(text)
+        added = self._queue.add(parsed)
+        self._refresh_queue_dialog()
+        return len(added), skipped
+
+    def clear_queue(self):
+        if self.queue_is_running():
+            self.statusMsg.setText("Stop the queue before clearing")
+            return
+        self._queue.reset()
+        self._refresh_queue_dialog()
+        if self.queue_dialog is not None:
+            self.queue_dialog.set_summary("")
+
+    def start_queue(self):
+        if self._mode != "idle":
+            self.statusMsg.setText("Finish the current download first")
+            return
+        if self._queue.next_pending() is None:
+            self.statusMsg.setText("Queue is empty — add some URLs first")
+            return
+        if not self._ensure_ready_to_download():
+            return
+        self._mode = "queue"
+        self._queue_halted = False
+        self.DownloadBtn.setText("Stop Queue")
+        self.DownloadBtn.setEnabled(True)
+        self.SettingsBtn.setEnabled(False)  # freeze settings while a queue runs
+        if self.queue_dialog is not None:
+            self.queue_dialog.set_running(True)
+        self._advance_queue()
+
+    def stop_queue(self):
+        if not self.queue_is_running():
+            return
+        self._queue_halted = True  # set BEFORE cancel so finished won't advance
+        self._mode = "stopping"
+        self._stopping_from = "queue"
+        self.statusMsg.setText("Stopping queue…")
+        self.DownloadBtn.setEnabled(False)
+        self._queue.cancel_pending()  # not-yet-started items become cancelled
+        self._refresh_queue_dialog()
+        self._cancel_event.set()
+        if self.scraper_thread is not None and self.scraper_thread.isRunning():
+            self.scraper_thread.request_cancel()
+        # The active item's item_finished -> _on_queue_item_finished sees the
+        # halt flag and routes to _finish_queue.
+
+    def _advance_queue(self):
+        if self._queue_halted:
+            self._finish_queue()
+            return
+        item = self._queue.next_pending()
+        if item is None:
+            self._finish_queue()
+            return
+        self._queue.mark(item.id, ACTIVE)
+        self._refresh_queue_dialog()
+        # Reset the shared progress bar for the new item so a late signal from
+        # the previous item can't leave a stale value on screen.
+        self.Reset_song_progress(0)
+        counts = self._queue.counts()
+        done_so_far = counts[DONE] + counts[FAILED] + counts[CANCELLED] + counts[PARTIAL]
+        self.statusMsg.setText(f"[{done_so_far + 1}/{counts['total']}] {item.display_name}")
+        self._cancel_event = threading.Event()  # FRESH event per item
+        self._start_scraper(
+            item.url,
+            self._cancel_event,
+            on_item_finished=lambda status, msg, iid=item.id: self._on_queue_item_finished(
+                iid, status, msg
+            ),
+            item_id=item.id,
+        )
+
+    def _on_queue_item_finished(self, item_id, status, message):
+        self._queue.mark(item_id, status)
+        self._refresh_queue_dialog()
+        # Defer so all of this item's queued signals drain before the next item
+        # launches (else the new scraper's counter reads 0 and its "Scraping
+        # started..." overwrites this item's result text).
+        if self._queue_halted:
+            QTimer.singleShot(0, self._finish_queue)
+        else:
+            QTimer.singleShot(0, self._advance_queue)
+
+    def _finish_queue(self):
+        if self._mode == "idle":
+            return  # already finalized — guard against a double call
+        self._mode = "idle"
+        self._stopping_from = None
+        self._queue_halted = False
+        self.DownloadBtn.setText("Download")
+        self.DownloadBtn.setEnabled(True)
+        self.SettingsBtn.setEnabled(True)
+        counts = self._queue.counts()
+        summary = f"Queue finished — {counts[DONE]} done"
+        if counts[PARTIAL]:
+            summary += f", {counts[PARTIAL]} partial"
+        if counts[FAILED]:
+            summary += f", {counts[FAILED]} failed"
+        if counts[CANCELLED]:
+            summary += f", {counts[CANCELLED]} cancelled"
+        self.statusMsg.setText(summary)
+        if self.queue_dialog is not None:
+            self.queue_dialog.set_running(False)
+            self.queue_dialog.set_summary(summary)
+
+    def _set_queue_item_name(self, item_id, name, source):
+        """Update a queue item's display name. ``source`` is "album"
+        (playlist/album name via song_Album) or "track" (title via song_meta);
+        each is applied only to the matching item kind so the "Single Track
+        Download" placeholder never overwrites a real name."""
+        item = self._queue.get(item_id)
+        if item is None or not name:
+            return
+        if source == "album" and item.kind == "track":
+            return
+        if source == "track" and item.kind != "track":
+            return
+        if self._queue.set_display_name(item_id, name):
+            self._refresh_queue_dialog()
+
+    def _refresh_queue_dialog(self):
+        if self.queue_dialog is not None:
+            self.queue_dialog.refresh(self._queue.items)
+
+    def closeEvent(self, event):
+        # Cancel and briefly wait on running download threads so we don't exit
+        # with a live QThread (Qt aborts with "QThread destroyed while still
+        # running"). The queue makes long multi-item runs common.
+        self._queue_halted = True
+        self._cancel_event.set()
+        for t in list(self._active_threads):
+            with contextlib.suppress(RuntimeError):
+                if hasattr(t, "request_cancel"):
+                    t.request_cancel()
+                if t.isRunning():
+                    t.wait(3000)  # bounded so close can't hang
+        super().closeEvent(event)
 
     def update_progress(self, message):
         self.statusMsg.setText(message)
