@@ -2010,3 +2010,78 @@ class TestMergeDialogSettings:
             {"a": 1}, {"a": 1, "some_future_setting": "x"}, "/d"
         )
         assert merged["some_future_setting"] == "x"
+
+
+class TestMaxTrackSize:
+    """Tests for the optional max file-size cap (avoids grabbing huge uploads)."""
+
+    @staticmethod
+    def _scraper(max_track_mb=0):
+        from Spotify_Downloader import MusicScraper
+
+        return MusicScraper(max_track_mb=max_track_mb)
+
+    def test_max_track_bytes_from_config(self):
+        """max_track_mb maps to max_track_bytes (MB -> bytes); 0 = no limit."""
+        assert self._scraper(max_track_mb=50).max_track_bytes == 50 * 1024 * 1024
+        assert self._scraper().max_track_bytes == 0
+
+    def test_oversized_download_is_discarded(self, tmp_path):
+        from Spotify_Downloader import MusicScraper
+
+        scraper = MusicScraper(max_track_mb=10)  # 10 MB cap
+        dest = str(tmp_path / "Song.mp3")
+        url = "https://www.youtube.com/watch?v=huge"
+        raised = None
+        with (
+            patch("Spotify_Downloader.get_ffmpeg_path", return_value="/usr/bin"),
+            patch.object(scraper, "_select_youtube_match", return_value=url),
+            patch("Spotify_Downloader.YoutubeDL") as mock_ydl,
+            patch("os.path.exists", side_effect=lambda p: p == dest),
+            patch("os.path.getsize", return_value=20 * 1024 * 1024),  # 20 MB > cap
+            patch("os.remove") as mock_remove,
+        ):
+            mock_ydl.return_value.__enter__ = MagicMock(return_value=mock_ydl)
+            mock_ydl.return_value.__exit__ = MagicMock(return_value=False)
+            try:
+                scraper.download_track_audio("ytsearch1:Song Artist audio", dest)
+            except RuntimeError as exc:
+                raised = str(exc)
+        assert raised is not None and "size limit" in raised
+        assert mock_remove.called  # the oversized file was deleted
+
+    def test_within_limit_download_succeeds(self, tmp_path):
+        from Spotify_Downloader import MusicScraper
+
+        scraper = MusicScraper(max_track_mb=10)
+        dest = str(tmp_path / "Song.mp3")
+        url = "https://www.youtube.com/watch?v=ok"
+        with (
+            patch("Spotify_Downloader.get_ffmpeg_path", return_value="/usr/bin"),
+            patch.object(scraper, "_select_youtube_match", return_value=url),
+            patch("Spotify_Downloader.YoutubeDL") as mock_ydl,
+            patch("os.path.exists", side_effect=lambda p: p == dest),
+            patch("os.path.getsize", return_value=5 * 1024 * 1024),  # 5 MB < cap
+        ):
+            mock_ydl.return_value.__enter__ = MagicMock(return_value=mock_ydl)
+            mock_ydl.return_value.__exit__ = MagicMock(return_value=False)
+            result, _ = scraper.download_track_audio("ytsearch1:Song Artist audio", dest)
+        assert result == dest
+
+    def test_no_limit_keeps_large_file(self, tmp_path):
+        from Spotify_Downloader import MusicScraper
+
+        scraper = MusicScraper(max_track_mb=0)  # no limit
+        dest = str(tmp_path / "Song.mp3")
+        url = "https://www.youtube.com/watch?v=big"
+        with (
+            patch("Spotify_Downloader.get_ffmpeg_path", return_value="/usr/bin"),
+            patch.object(scraper, "_select_youtube_match", return_value=url),
+            patch("Spotify_Downloader.YoutubeDL") as mock_ydl,
+            patch("os.path.exists", side_effect=lambda p: p == dest),
+            patch("os.path.getsize", return_value=500 * 1024 * 1024),  # 500 MB
+        ):
+            mock_ydl.return_value.__enter__ = MagicMock(return_value=mock_ydl)
+            mock_ydl.return_value.__exit__ = MagicMock(return_value=False)
+            result, _ = scraper.download_track_audio("ytsearch1:Song Artist audio", dest)
+        assert result == dest  # no cap -> kept regardless of size

@@ -169,6 +169,7 @@ def load_config() -> dict:
         "quality": "192",
         "extended_mix": False,
         "max_extended_minutes": 20,
+        "max_track_mb": 0,
         "artist_first": False,
     }
     try:
@@ -188,6 +189,13 @@ def load_config() -> dict:
         except (TypeError, ValueError):
             mem = 20
         defaults["max_extended_minutes"] = mem
+        try:
+            mb = int(defaults["max_track_mb"])
+            if mb < 0:
+                mb = 0
+        except (TypeError, ValueError):
+            mb = 0
+        defaults["max_track_mb"] = mb  # 0 = no file-size limit
         return defaults
     except (OSError, json.JSONDecodeError):
         return defaults
@@ -227,6 +235,7 @@ class MusicScraper(QThread):
         audio_quality: str = "192",
         extended_mix: bool = False,
         max_extended_minutes: int = 20,
+        max_track_mb: int = 0,
         artist_first: bool = False,
     ):
         super().__init__()
@@ -245,6 +254,12 @@ class MusicScraper(QThread):
         except (TypeError, ValueError):
             mem = MusicScraper._DEFAULT_MAX_EXTENDED_MINUTES
         self.max_track_duration_s = max(1, mem) * 60
+        # Max output file size in bytes (0 = no limit). Guards against grabbing
+        # a giant upload (e.g. a 2-hour DJ mix) instead of the intended track.
+        try:
+            self.max_track_bytes = max(0, int(max_track_mb)) * 1024 * 1024
+        except (TypeError, ValueError):
+            self.max_track_bytes = 0
         self.artist_first = bool(artist_first)
         self._counter_lock = threading.Lock()
         self._failed_lock = threading.Lock()
@@ -553,6 +568,7 @@ class MusicScraper(QThread):
         # that specific video. Success is decided purely by whether an audio
         # file landed on disk, so a search with no playable source fails loudly
         # instead of silently reporting a path that does not exist.
+        too_big = False
         for query, pe in self._build_youtube_download_plan(search_query, fallback_query):
             video_url = self._select_youtube_match(query, expected_duration_s, prefer_extended=pe)
             if not video_url:
@@ -565,8 +581,20 @@ class MusicScraper(QThread):
                 # file-exists check below is the single source of truth.
                 pass
             if os.path.exists(expected_path):
+                # Enforce the optional max file-size cap on the FINAL file. A
+                # too-large file is the wrong-version signal (e.g. an hour-long
+                # mix), so discard it and try the next candidate/fallback.
+                if self.max_track_bytes and os.path.getsize(expected_path) > self.max_track_bytes:
+                    too_big = True
+                    with contextlib.suppress(OSError):
+                        os.remove(expected_path)
+                    continue
                 return expected_path, pe
 
+        if too_big:
+            raise RuntimeError(
+                f"track exceeds the {self.max_track_bytes // (1024 * 1024)} MB size limit"
+            )
         raise RuntimeError("no playable audio source found on YouTube for this track")
 
     def _resolve_extended_output(
@@ -1099,6 +1127,7 @@ class ScraperThread(QThread):
         audio_quality: str = "192",
         extended_mix: bool = False,
         max_extended_minutes: int = 20,
+        max_track_mb: int = 0,
         artist_first: bool = False,
     ):
         super().__init__()
@@ -1112,6 +1141,7 @@ class ScraperThread(QThread):
             audio_quality=audio_quality,
             extended_mix=extended_mix,
             max_extended_minutes=max_extended_minutes,
+            max_track_mb=max_track_mb,
             artist_first=artist_first,
         )
         # Capture the terminal status string synchronously IN the worker thread.
@@ -1341,6 +1371,20 @@ class SettingsDialog(QDialog):
         self._max_extended_minutes_spin = QSpinBox()
         self._max_extended_minutes_spin.setRange(1, 180)
         self._max_extended_minutes_spin.setValue(int(self._config.get("max_extended_minutes", 20)))
+        self._max_extended_minutes_spin.setToolTip(
+            "Reject an extended candidate longer than this (guards against "
+            "grabbing an hour-long mix instead of the real extended cut)."
+        )
+
+        self._max_track_mb_spin = QSpinBox()
+        self._max_track_mb_spin.setRange(0, 2000)
+        self._max_track_mb_spin.setValue(int(self._config.get("max_track_mb", 0)))
+        self._max_track_mb_spin.setSpecialValueText("No limit")  # shown when value == 0
+        self._max_track_mb_spin.setSuffix(" MB")
+        self._max_track_mb_spin.setToolTip(
+            "Discard any download whose file exceeds this size and try the next "
+            "match. 0 = no limit. Applies to all downloads."
+        )
 
         self._artist_first_cb = QCheckBox("Name files as 'Artist - Track'")
         self._artist_first_cb.setChecked(bool(self._config.get("artist_first", False)))
@@ -1351,6 +1395,7 @@ class SettingsDialog(QDialog):
         form.addRow("Audio quality:", self._quality_cb)
         form.addRow("Extended mix:", self._extended_mix_cb)
         form.addRow("Max extended-mix length (minutes):", self._max_extended_minutes_spin)
+        form.addRow("Max file size:", self._max_track_mb_spin)
         form.addRow("Filename order:", self._artist_first_cb)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -1405,6 +1450,7 @@ class SettingsDialog(QDialog):
         self._config["quality"] = self._quality_cb.currentText().split()[0]
         self._config["extended_mix"] = self._extended_mix_cb.isChecked()
         self._config["max_extended_minutes"] = self._max_extended_minutes_spin.value()
+        self._config["max_track_mb"] = self._max_track_mb_spin.value()
         self._config["artist_first"] = self._artist_first_cb.isChecked()
         return self._config
 
@@ -1695,6 +1741,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             audio_quality=self._config.get("quality", "192"),
             extended_mix=bool(self._config.get("extended_mix", False)),
             max_extended_minutes=self._config.get("max_extended_minutes", 20),
+            max_track_mb=self._config.get("max_track_mb", 0),
             artist_first=self._config.get("artist_first", False),
         )
         self.scraper_thread = thread
