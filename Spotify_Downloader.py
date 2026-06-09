@@ -44,18 +44,19 @@ from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
-    QDialog,
-    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -84,7 +85,7 @@ from spotifydown_api import (
     extract_playlist_id,
     sanitize_filename,
 )
-from ui_main import Ui_MainWindow
+from ui_main import INPUT_H, Ui_MainWindow
 
 
 def get_ffmpeg_path():
@@ -1317,118 +1318,146 @@ class DownloadThumbnail(QThread):
         self.main_UI.CoverImg.show()
 
 
-class SettingsDialog(QDialog):
-    """Download folder + audio format + quality in one dialog."""
+class SettingsPanel(QWidget):
+    """Settings as an embedded content page (no modal dialog).
 
-    def __init__(self, parent, config: dict):
-        super().__init__(parent)
-        self.setWindowTitle("Setlist Settings")
-        self.setModal(True)
-        # Min width + resizable so the full path fits on any screen; wider
-        # default because macOS path strings are long (`/Users/.../Music/...`).
-        self.setMinimumWidth(560)
-        self.resize(620, self.sizeHint().height())
-        self._config = dict(config)
+    Lives in the sidebar nav like the other pages and applies + persists each
+    change immediately through the controller — there is no OK/Cancel because a
+    pane has no commit boundary. Grouped into bordered "cards" (Output /
+    Matching) with left-aligned labels and full-width controls.
+    """
 
-        from PyQt5.QtWidgets import QLineEdit, QSpinBox
+    def __init__(self, controller):
+        super().__init__()
+        self._controller = controller
+        cfg = controller._config
 
-        # QLineEdit (read-only) handles arbitrarily long paths cleanly: it
-        # elides mid-path with horizontal scroll on focus, rather than
-        # truncating and leaving the user guessing. Tooltip always shows the
-        # full value.
-        self._folder_label = QLineEdit(self._config.get("download_path") or "(not set)")
-        self._folder_label.setReadOnly(True)
-        self._folder_label.setFrame(False)
-        self._folder_label.setCursorPosition(0)
-        self._folder_label.setToolTip(self._folder_label.text())
-        self._folder_label.setStyleSheet(
-            "QLineEdit { background: transparent; color: #FFFFFF; border: none; padding: 0; }"
-        )
-        browse = QPushButton("Choose folder")
-        browse.clicked.connect(self._choose_folder)
+        body = QVBoxLayout(self)
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(10)
 
+        # ---- Output card ----
+        self._folder_field = QLineEdit(controller.download_path or "(not set)")
+        self._folder_field.setObjectName("PlaylistLink")  # reuse the input look
+        self._folder_field.setReadOnly(True)
+        self._folder_field.setCursorPosition(0)
+        self._folder_field.setToolTip(self._folder_field.text())
+        self._folder_field.setFixedHeight(40)
+        choose = QPushButton("Choose…")
+        choose.setObjectName("QueueBtn")
+        choose.setFixedHeight(40)
+        choose.setMinimumWidth(110)
+        choose.setCursor(QCursor(Qt.PointingHandCursor))
+        choose.clicked.connect(self._choose_folder)
         folder_row = QHBoxLayout()
-        folder_row.addWidget(self._folder_label, 1)
-        folder_row.addWidget(browse)
-
-        header = QLabel("Settings")
-        header.setObjectName("settingsHeader")
+        folder_row.setSpacing(10)
+        folder_row.addWidget(self._folder_field, 1)
+        folder_row.addWidget(choose)
 
         self._format_cb = theme.ThemedComboBox()
         for key in SUPPORTED_FORMATS:
             self._format_cb.addItem(key)
-        self._format_cb.setCurrentText(self._config.get("format", "mp3"))
+        self._format_cb.setCurrentText(cfg.get("format", "mp3"))
         self._format_cb.currentTextChanged.connect(self._on_format_change)
+        self._format_cb.currentTextChanged.connect(lambda t: self._save("format", t))
 
         self._quality_cb = theme.ThemedComboBox()
         for q in SUPPORTED_QUALITIES:
             self._quality_cb.addItem(f"{q} kbps")
-        current_q = self._config.get("quality", "192")
-        self._quality_cb.setCurrentText(f"{current_q} kbps")
-        self._on_format_change(self._format_cb.currentText())
+        self._quality_cb.setCurrentText(f"{cfg.get('quality', '192')} kbps")
+        self._quality_cb.currentTextChanged.connect(lambda t: self._save("quality", t.split()[0]))
 
-        self._extended_mix_cb = QCheckBox("Prefer extended mix / club mix versions")
-        self._extended_mix_cb.setChecked(bool(self._config.get("extended_mix", False)))
+        self._filename_order_cb = theme.ThemedComboBox()
+        self._filename_order_cb.addItem("Title - Artist")
+        self._filename_order_cb.addItem("Artist - Title")
+        self._filename_order_cb.setCurrentIndex(1 if cfg.get("artist_first") else 0)
+        self._filename_order_cb.currentIndexChanged.connect(
+            lambda i: self._save("artist_first", i == 1)
+        )
+
+        out_card, out_form = self._card()
+        out_form.addRow("Download folder", folder_row)
+        out_form.addRow("Audio format", self._format_cb)
+        out_form.addRow("Audio quality", self._quality_cb)
+        out_form.addRow("Filename order", self._filename_order_cb)
+
+        # ---- Matching card ----
+        self._extended_mix_cb = QCheckBox("Prefer extended / club mix versions")
+        self._extended_mix_cb.setChecked(bool(cfg.get("extended_mix", False)))
+        self._extended_mix_cb.toggled.connect(lambda on: self._save("extended_mix", on))
+        self._extended_mix_cb.toggled.connect(self._sync_extended_enabled)
 
         self._max_extended_minutes_spin = QSpinBox()
         self._max_extended_minutes_spin.setRange(1, 180)
-        self._max_extended_minutes_spin.setValue(int(self._config.get("max_extended_minutes", 20)))
+        self._max_extended_minutes_spin.setValue(int(cfg.get("max_extended_minutes", 20)))
+        self._max_extended_minutes_spin.setSuffix(" min")
+        self._max_extended_minutes_spin.setFixedHeight(36)
         self._max_extended_minutes_spin.setToolTip(
             "Reject an extended candidate longer than this (guards against "
             "grabbing an hour-long mix instead of the real extended cut)."
         )
+        self._max_extended_minutes_spin.valueChanged.connect(
+            lambda v: self._save("max_extended_minutes", v)
+        )
 
         self._max_track_mb_spin = QSpinBox()
         self._max_track_mb_spin.setRange(0, 2000)
-        self._max_track_mb_spin.setValue(int(self._config.get("max_track_mb", 0)))
+        self._max_track_mb_spin.setValue(int(cfg.get("max_track_mb", 0)))
         self._max_track_mb_spin.setSpecialValueText("No limit")  # shown when value == 0
         self._max_track_mb_spin.setSuffix(" MB")
+        self._max_track_mb_spin.setFixedHeight(36)
         self._max_track_mb_spin.setToolTip(
             "Discard any download whose file exceeds this size and try the next "
-            "match. 0 = no limit. Applies to all downloads."
+            "match. 0 = no limit."
         )
+        self._max_track_mb_spin.valueChanged.connect(lambda v: self._save("max_track_mb", v))
 
-        # Filename order as a dropdown (two naming formats) rather than a
-        # checkbox. Index 0 -> "Title - Artist" (artist_first=False, default),
-        # index 1 -> "Artist - Title" (artist_first=True). Mirrors the stems
-        # built in ScraperThread._format_track_filename.
-        self._filename_order_cb = theme.ThemedComboBox()
-        self._filename_order_cb.addItem("Title - Artist")
-        self._filename_order_cb.addItem("Artist - Title")
-        self._filename_order_cb.setCurrentIndex(
-            1 if bool(self._config.get("artist_first", False)) else 0
-        )
-        self._filename_order_cb.setToolTip("How downloaded files are named.")
+        match_card, match_form = self._card()
+        match_form.addRow(self._extended_mix_cb)  # span full width, left-aligned
+        match_form.addRow("Max extended-mix length", self._max_extended_minutes_spin)
+        match_form.addRow("Max file size", self._max_track_mb_spin)
 
-        form = QFormLayout()
-        form.addRow("Download folder:", folder_row)
-        form.addRow("Audio format:", self._format_cb)
-        form.addRow("Audio quality:", self._quality_cb)
-        form.addRow("Extended mix:", self._extended_mix_cb)
-        form.addRow("Max extended-mix length (minutes):", self._max_extended_minutes_spin)
-        form.addRow("Max file size:", self._max_track_mb_spin)
-        form.addRow("Filename order:", self._filename_order_cb)
+        body.addWidget(self._section("OUTPUT"))
+        body.addWidget(out_card)
+        body.addWidget(self._section("MATCHING"))
+        body.addWidget(match_card)
+        body.addStretch(1)
 
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
-        ok_btn = btns.button(QDialogButtonBox.Ok)
-        ok_btn.setObjectName("settingsOkBtn")
-        cancel_btn = btns.button(QDialogButtonBox.Cancel)
-        cancel_btn.setObjectName("settingsCancelBtn")
+        # Apply initial dependent-state (lossless disables bitrate, etc.)
+        self._on_format_change(self._format_cb.currentText())
+        self._sync_extended_enabled(self._extended_mix_cb.isChecked())
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(12)
-        layout.addWidget(header)
-        layout.addLayout(form)
-        form.setSpacing(12)
-        layout.addWidget(btns)
+    def _card(self):
+        card = QFrame()
+        card.setObjectName("card")
+        form = QFormLayout(card)
+        form.setContentsMargins(18, 16, 18, 16)
+        form.setHorizontalSpacing(24)
+        form.setVerticalSpacing(14)
+        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        return card, form
+
+    def _section(self, text):
+        lbl = QLabel(text)
+        lbl.setObjectName("sectionLabel")
+        return lbl
+
+    def _save(self, key, value):
+        self._controller.apply_setting(key, value)
+
+    def _sync_extended_enabled(self, on):
+        self._max_extended_minutes_spin.setEnabled(bool(on))
+
+    def _on_format_change(self, fmt):
+        """Lossless formats (flac/wav) ignore the bitrate selector."""
+        is_lossy = SUPPORTED_FORMATS.get(fmt, {}).get("lossy", True)
+        self._quality_cb.setEnabled(is_lossy)
 
     def _choose_folder(self):
         start = (
-            self._folder_label.text()
-            if os.path.isdir(self._folder_label.text())
+            self._folder_field.text()
+            if os.path.isdir(self._folder_field.text())
             else os.path.expanduser("~")
         )
         folder = QFileDialog.getExistingDirectory(
@@ -1439,31 +1468,16 @@ class SettingsDialog(QDialog):
         )
         if folder:
             # Only append "Setlist" when the user picked a non-Setlist folder,
-            # otherwise re-selecting the existing destination creates nested
-            # Setlist/Setlist/... paths.
+            # otherwise re-selecting the destination nests Setlist/Setlist/...
             chosen = (
                 folder
                 if os.path.basename(folder.rstrip(os.sep)) == "Setlist"
                 else os.path.join(folder, "Setlist")
             )
-            self._folder_label.setText(chosen)
-            self._folder_label.setCursorPosition(0)
-            self._folder_label.setToolTip(chosen)
-
-    def _on_format_change(self, fmt: str) -> None:
-        """Lossless formats (flac/wav) ignore the bitrate selector."""
-        is_lossy = SUPPORTED_FORMATS.get(fmt, {}).get("lossy", True)
-        self._quality_cb.setEnabled(is_lossy)
-
-    def result_config(self) -> dict:
-        self._config["download_path"] = self._folder_label.text()
-        self._config["format"] = self._format_cb.currentText()
-        self._config["quality"] = self._quality_cb.currentText().split()[0]
-        self._config["extended_mix"] = self._extended_mix_cb.isChecked()
-        self._config["max_extended_minutes"] = self._max_extended_minutes_spin.value()
-        self._config["max_track_mb"] = self._max_track_mb_spin.value()
-        self._config["artist_first"] = self._filename_order_cb.currentIndex() == 1
-        return self._config
+            self._folder_field.setText(chosen)
+            self._folder_field.setCursorPosition(0)
+            self._folder_field.setToolTip(chosen)
+            self._controller.apply_download_path(chosen)
 
 
 class QueuePanel(QWidget):
@@ -1518,21 +1532,25 @@ class QueuePanel(QWidget):
 
         self._start_btn = QPushButton("Start")
         self._start_btn.setObjectName("DownloadBtn")
-        self._start_btn.setMinimumHeight(38)
+        self._start_btn.setFixedHeight(INPUT_H)
+        self._start_btn.setMinimumWidth(130)
         self._start_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self._start_btn.clicked.connect(lambda: self._controller.start_queue())
         self._stop_btn = QPushButton("Stop")
         self._stop_btn.setObjectName("QueueBtn")
-        self._stop_btn.setMinimumHeight(38)
+        self._stop_btn.setFixedHeight(INPUT_H)
+        self._stop_btn.setMinimumWidth(110)
         self._stop_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self._stop_btn.clicked.connect(lambda: self._controller.stop_queue())
         self._stop_btn.setEnabled(False)
         self._clear_btn = QPushButton("Clear")
         self._clear_btn.setObjectName("QueueBtn")
-        self._clear_btn.setMinimumHeight(38)
+        self._clear_btn.setFixedHeight(INPUT_H)
+        self._clear_btn.setMinimumWidth(110)
         self._clear_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self._clear_btn.clicked.connect(lambda: self._controller.clear_queue())
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(12)  # space between Start and Stop
         btn_row.addWidget(self._start_btn)
         btn_row.addWidget(self._stop_btn)
         btn_row.addStretch(1)
@@ -1619,7 +1637,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.show_preview(self.showPreviewCheck.checkState())  # apply initial state
 
         self.Select_Home.clicked.connect(self.Linkedin)
-        self.SettingsBtn.clicked.connect(self.open_settings)
 
         # Sidebar navigation switches the content stack. Drive it off `toggled`
         # rather than `clicked`: the buttons are checkable and exclusive, and
@@ -1629,12 +1646,18 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.navHome.toggled.connect(lambda on: self.content.setCurrentIndex(0) if on else None)
         self.navQueue.toggled.connect(lambda on: self._show_queue_page() if on else None)
         self.navHistory.toggled.connect(lambda on: self.content.setCurrentIndex(2) if on else None)
+        self.SettingsBtn.toggled.connect(lambda on: self.content.setCurrentIndex(3) if on else None)
 
         # Queue is an embedded page now. The controller drives it through
         # self.queue_dialog (refresh / set_running / set_summary), the same
         # interface the old floating dialog exposed.
         self.queue_dialog = QueuePanel(self)
         self.queuePageLayout.addWidget(self.queue_dialog, 1)
+
+        # Settings is also an embedded page (no modal dialog). It reads + writes
+        # self._config and persists each change immediately.
+        self.settings_panel = SettingsPanel(self)
+        self.settingsPageLayout.addWidget(self.settings_panel, 1)
 
         # The Home "Add to Download Queue" button jumps to the Queue page.
         self.QueueBtn.clicked.connect(self.open_queue_dialog)
@@ -1709,33 +1732,17 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             return True
         return False
 
-    @staticmethod
-    def _merge_dialog_settings(config: dict, new: dict, download_path: str) -> dict:
-        """Apply a SettingsDialog result onto the config.
+    def apply_setting(self, key, value):
+        """Persist a single setting change from the Settings pane."""
+        self._config[key] = value
+        save_config(self._config)
 
-        Persists EVERY key the dialog returns rather than a hand-maintained
-        allowlist — a previous allowlist silently dropped new settings
-        (artist_first, max_extended_minutes), so toggling them did nothing.
-        download_path is forced to the resolved value.
-        """
-        merged = dict(config)
-        merged.update(new)
-        merged["download_path"] = download_path
-        return merged
-
-    def open_settings(self):
-        """Full settings dialog: folder + audio format + bitrate."""
-        cfg_for_dialog = dict(self._config)
-        cfg_for_dialog["download_path"] = self.download_path
-        dialog = SettingsDialog(self, cfg_for_dialog)
-        if dialog.exec_() == QDialog.Accepted:
-            new = dialog.result_config()
-            if new.get("download_path"):
-                self.download_path = new["download_path"]
-                self._download_path_set = True
-            self._config = self._merge_dialog_settings(self._config, new, self.download_path)
-            save_config(self._config)
-            self.statusMsg.setText("Settings saved")
+    def apply_download_path(self, path):
+        """Persist a download-folder change from the Settings pane."""
+        self.download_path = path
+        self._download_path_set = True
+        self._config["download_path"] = path
+        save_config(self._config)
 
     def _ensure_ready_to_download(self):
         """Prompt for / validate the download folder. Returns True if usable."""

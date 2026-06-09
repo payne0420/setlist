@@ -22,6 +22,7 @@ def _asset_url(name: str) -> str:
 
 _CHEVRON_DOWN = _asset_url("chevron-down.svg")
 _CHEVRON_UP = _asset_url("chevron-up.svg")
+_CHECK = _asset_url("check.svg")
 
 COLORS = {
     "base": "#121212",
@@ -284,6 +285,12 @@ QFrame#previewBox {{
     border: none;
 }}
 
+/* Settings pane: form row labels read as muted text, controls stand out */
+QWidget#settingsPage QFrame#card QLabel {{
+    color: {COLORS["text_secondary"]};
+    font-size: 13px;
+}}
+
 QListWidget#trackList {{
     background-color: transparent;
     border: none;
@@ -376,7 +383,7 @@ QCheckBox::indicator:unchecked:hover {{
 QCheckBox::indicator:checked {{
     background-color: {COLORS["accent"]};
     border: 2px solid {COLORS["accent"]};
-    image: url(none);
+    image: url({_CHECK});
 }}
 
 QProgressBar#SongDownloadprogress, QProgressBar#SongDownloadprogressBar {{

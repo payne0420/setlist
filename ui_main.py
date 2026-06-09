@@ -17,6 +17,10 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 _POINTING = QtCore.Qt.PointingHandCursor
 
+# Shared height for the URL field and the primary action buttons (Download,
+# queue Start/Stop/Clear) so they line up across pages.
+INPUT_H = 46
+
 
 class Ui_MainWindow:
     def setupUi(self, MainWindow):
@@ -40,6 +44,7 @@ class Ui_MainWindow:
         self._build_home_page()  # index 0
         self._build_queue_page()  # index 1
         self._build_history_page()  # index 2
+        self._build_settings_page()  # index 3
 
         MainWindow.setCentralWidget(self.centralwidget)
         self.retranslateUi(MainWindow)
@@ -68,20 +73,19 @@ class Ui_MainWindow:
         side.addWidget(self.wordmark)
         side.addSpacing(20)
 
-        # Page-switching nav (exclusive). Settings opens a dialog, so it is a
-        # plain (non-checkable) action that doesn't join the exclusive group.
+        # Page-switching nav — all four are checkable and exclusive; each maps
+        # to a page in the content stack (Settings is now a pane, not a dialog).
         self.navHome = self._nav_button("navHome")
         self.navQueue = self._nav_button("navQueue")
         self.navHistory = self._nav_button("navHistory")
-        self.SettingsBtn = self._nav_button("SettingsBtn", checkable=False)
+        self.SettingsBtn = self._nav_button("SettingsBtn")
 
         self.navGroup = QtWidgets.QButtonGroup(self.sidebar)
         self.navGroup.setExclusive(True)
-        for b in (self.navHome, self.navQueue, self.navHistory):
+        for b in (self.navHome, self.navQueue, self.navHistory, self.SettingsBtn):
             self.navGroup.addButton(b)
             side.addWidget(b)
         self.navHome.setChecked(True)
-        side.addWidget(self.SettingsBtn)
 
         side.addStretch(1)
 
@@ -114,11 +118,12 @@ class Ui_MainWindow:
         urlRow.setSpacing(12)
         self.PlaylistLink = QtWidgets.QLineEdit(self.homePage)
         self.PlaylistLink.setObjectName("PlaylistLink")
-        self.PlaylistLink.setMinimumHeight(40)
+        self.PlaylistLink.setFixedHeight(INPUT_H)
         self.PlaylistLink.setClearButtonEnabled(True)
         self.DownloadBtn = QtWidgets.QPushButton(self.homePage)
         self.DownloadBtn.setObjectName("DownloadBtn")
-        self.DownloadBtn.setMinimumSize(QtCore.QSize(120, 40))
+        self.DownloadBtn.setFixedHeight(INPUT_H)  # match the URL field height
+        self.DownloadBtn.setMinimumWidth(130)
         self.DownloadBtn.setCursor(QtGui.QCursor(_POINTING))
         urlRow.addWidget(self.PlaylistLink, 1)
         urlRow.addWidget(self.DownloadBtn)
@@ -126,7 +131,7 @@ class Ui_MainWindow:
 
         self.QueueBtn = QtWidgets.QPushButton(self.homePage)
         self.QueueBtn.setObjectName("QueueBtn")
-        self.QueueBtn.setMinimumHeight(38)
+        self.QueueBtn.setFixedHeight(INPUT_H)
         self.QueueBtn.setCursor(QtGui.QCursor(_POINTING))
         lay.addWidget(self.QueueBtn)
 
@@ -270,6 +275,18 @@ class Ui_MainWindow:
         lay.addWidget(self.historyList, 1)
         self.content.addWidget(self.historyPage)
 
+    def _build_settings_page(self):
+        self.settingsPage = QtWidgets.QWidget()
+        self.settingsPage.setObjectName("settingsPage")
+        self.settingsPageLayout = QtWidgets.QVBoxLayout(self.settingsPage)
+        self.settingsPageLayout.setContentsMargins(28, 24, 28, 24)
+        self.settingsPageLayout.setSpacing(16)
+        self.settingsTitle = QtWidgets.QLabel(self.settingsPage)
+        self.settingsTitle.setObjectName("pageTitle")
+        self.settingsPageLayout.addWidget(self.settingsTitle)
+        # The SettingsPanel widget is injected here by the controller.
+        self.content.addWidget(self.settingsPage)
+
     # ------------------------------------------------------------------ text
     def retranslateUi(self, MainWindow):
         _t = QtCore.QCoreApplication.translate
@@ -302,3 +319,4 @@ class Ui_MainWindow:
         self.historyTitle.setText(_t("MainWindow", "History"))
         self.clearHistoryBtn.setText(_t("MainWindow", "Clear history"))
         self.historyHint.setText(_t("MainWindow", "COMPLETED THIS SESSION"))
+        self.settingsTitle.setText(_t("MainWindow", "Settings"))

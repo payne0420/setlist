@@ -674,7 +674,7 @@ class TestExtendedMixDownload:
         fallback_url = "https://www.youtube.com/watch?v=original"
 
         mock_select = MagicMock(
-            side_effect=lambda query, expected_duration_s, prefer_extended=False: (
+            side_effect=lambda query, expected_duration_s, prefer_extended=False: (  # noqa: ARG005
                 None
                 if prefer_extended
                 else fallback_url
@@ -713,7 +713,7 @@ class TestExtendedMixDownload:
         extended_url = "https://www.youtube.com/watch?v=extended"
 
         mock_select = MagicMock(
-            side_effect=lambda query, expected_duration_s, prefer_extended=False: (
+            side_effect=lambda query, expected_duration_s, prefer_extended=False: (  # noqa: ARG005
                 extended_url if prefer_extended else None
             )
         )
@@ -1967,49 +1967,52 @@ class TestFilenameOrder:
         )
 
 
-class TestMergeDialogSettings:
-    """MainWindow._merge_dialog_settings must persist EVERY dialog setting, not a
+class _ConfigStub:
+    """Minimal stand-in for MainWindow so apply_* can be unit-tested without
+    building the whole Qt UI (the methods only touch _config / download_path)."""
+
+    def __init__(self, config=None):
+        self._config = dict(config or {})
+        self.download_path = None
+        self._download_path_set = False
+
+
+class TestApplySettings:
+    """The Settings pane persists each change immediately via apply_setting /
+    apply_download_path — every key is written (incl. future keys), not a
     hand-maintained allowlist (regression: artist_first / max_extended_minutes
-    were silently dropped on save, so toggling them did nothing)."""
+    were once silently dropped on save)."""
 
-    def test_persists_all_dialog_settings(self):
+    def test_apply_setting_writes_and_saves(self, mocker):
         from Spotify_Downloader import MainWindow
 
-        config = {
-            "version": 1,
-            "download_path": "/old",
-            "format": "mp3",
-            "quality": "192",
-            "extended_mix": False,
-            "max_extended_minutes": 20,
-            "artist_first": False,
-        }
-        new = {
-            "version": 1,
-            "download_path": "/old",
-            "format": "flac",
-            "quality": "320",
-            "extended_mix": True,
-            "max_extended_minutes": 45,
-            "artist_first": True,
-        }
-        merged = MainWindow._merge_dialog_settings(config, new, "/downloads")
-        assert merged["artist_first"] is True
-        assert merged["max_extended_minutes"] == 45
-        assert merged["extended_mix"] is True
-        assert merged["quality"] == "320"
-        assert merged["format"] == "flac"
-        assert merged["download_path"] == "/downloads"
-        # original config dict is not mutated
-        assert config["artist_first"] is False
+        save = mocker.patch("Spotify_Downloader.save_config")
+        stub = _ConfigStub({"format": "mp3", "artist_first": False})
+        MainWindow.apply_setting(stub, "artist_first", True)
+        MainWindow.apply_setting(stub, "format", "flac")
+        assert stub._config["artist_first"] is True
+        assert stub._config["format"] == "flac"
+        assert save.call_count == 2
 
-    def test_unknown_future_key_also_persists(self):
+    def test_apply_setting_persists_unknown_future_key(self, mocker):
         from Spotify_Downloader import MainWindow
 
-        merged = MainWindow._merge_dialog_settings(
-            {"a": 1}, {"a": 1, "some_future_setting": "x"}, "/d"
-        )
-        assert merged["some_future_setting"] == "x"
+        save = mocker.patch("Spotify_Downloader.save_config")
+        stub = _ConfigStub({"a": 1})
+        MainWindow.apply_setting(stub, "some_future_setting", "x")
+        assert stub._config["some_future_setting"] == "x"
+        save.assert_called_once_with(stub._config)
+
+    def test_apply_download_path(self, mocker):
+        from Spotify_Downloader import MainWindow
+
+        save = mocker.patch("Spotify_Downloader.save_config")
+        stub = _ConfigStub()
+        MainWindow.apply_download_path(stub, "/music/Setlist")
+        assert stub.download_path == "/music/Setlist"
+        assert stub._download_path_set is True
+        assert stub._config["download_path"] == "/music/Setlist"
+        save.assert_called_once_with(stub._config)
 
 
 class TestMaxTrackSize:
