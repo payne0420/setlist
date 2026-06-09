@@ -2,7 +2,7 @@
 
 > **⚠️ Educational Project Notice**
 >
-> This Code of Conduct applies to the **Sunnify** repository, which is a **student portfolio project** created for educational and demonstration purposes only. This project does not condone, encourage, or facilitate copyright infringement or piracy. By participating in this community, you acknowledge the educational nature of this project and agree to use it only in compliance with applicable laws. See [DISCLAIMER.md](DISCLAIMER.md) for full legal terms.
+> This Code of Conduct applies to the **Setlist** repository, which is a **student portfolio project** created for educational and demonstration purposes only. This project does not condone, encourage, or facilitate copyright infringement or piracy. By participating in this community, you acknowledge the educational nature of this project and agree to use it only in compliance with applicable laws. See [DISCLAIMER.md](DISCLAIMER.md) for full legal terms.
 
 ---
 

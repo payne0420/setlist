@@ -15,13 +15,13 @@ const geistMono = localFont({
 })
 
 export const metadata: Metadata = {
-  title: "Sunnify - Spotify Playlist Downloader",
+  title: "Setlist - Spotify Playlist Downloader",
   description:
     "Download entire Spotify playlists to local MP3s with embedded artwork and tags. Free, open-source, no account required.",
   keywords: ["spotify", "downloader", "mp3", "playlist", "music", "converter"],
   authors: [{ name: "Sunny Jayendra Patel" }],
   openGraph: {
-    title: "Sunnify - Spotify Playlist Downloader",
+    title: "Setlist - Spotify Playlist Downloader",
     description: "Download Spotify playlists to MP3 with artwork and tags",
     type: "website",
   },

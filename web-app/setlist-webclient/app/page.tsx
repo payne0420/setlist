@@ -1,9 +1,9 @@
-import SunnifyApp from "@/components/sunnify-app"
+import SetlistApp from "@/components/setlist-app"
 
 export default function Home() {
   return (
     <main>
-      <SunnifyApp />
+      <SetlistApp />
     </main>
   )
 }

@@ -1,6 +1,6 @@
 # External API Status
 
-Sunnify v2.0.7 uses Spotify's embed page endpoints to fetch playlist and track
+Setlist v2.0.7 uses Spotify's embed page endpoints to fetch playlist and track
 metadata without requiring developer credentials. YouTube (via `yt-dlp`) is used
 for audio downloads, with up to 4 tracks fetched in parallel.
 
@@ -16,7 +16,7 @@ for audio downloads, with up to 4 tracks fetched in parallel.
 
 ### Fallback: spclient API (for large playlists)
 
-For playlists with >100 tracks, Sunnify uses an anonymous access token extracted
+For playlists with >100 tracks, Setlist uses an anonymous access token extracted
 from embed pages to query `spclient.wg.spotify.com/playlist/v2/playlist/{id}`
 for the complete track URI list, then fetches individual track metadata via
 embed pages.

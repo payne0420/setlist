@@ -62,7 +62,7 @@ caps all live in **Settings (⚙)**.
 
 ```bash
 pip install pyinstaller
-pyinstaller Sunnify.spec     # produces dist/ for your platform
+pyinstaller Setlist.spec     # produces dist/ for your platform
 ```
 
 ## Tests

@@ -21,7 +21,7 @@ jobs:
 
           # Allow up to 60 seconds for cold start
           RESPONSE=$(curl -sf --max-time 60 \
-            "https://sunnify-spotify-downloader.onrender.com/api/health" || echo "FAILED")
+            "https://setlist-spotify-downloader.onrender.com/api/health" || echo "FAILED")
 
           if [ "$RESPONSE" = "FAILED" ]; then
             echo "Health check failed - backend may be down"
@@ -41,4 +41,4 @@ jobs:
       - name: Notify on failure
         if: failure()
         run: |
-          echo "::error::Render backend health check failed. Check https://sunnify-spotify-downloader.onrender.com"
+          echo "::error::Render backend health check failed. Check https://setlist-spotify-downloader.onrender.com"

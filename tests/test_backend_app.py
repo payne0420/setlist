@@ -14,7 +14,7 @@ FLASK_AVAILABLE = importlib.util.find_spec("flask") is not None
 
 # Add backend directory for imports
 ROOT = Path(__file__).resolve().parent.parent
-BACKEND_DIR = ROOT / "web-app" / "sunnify-backend"
+BACKEND_DIR = ROOT / "web-app" / "setlist-backend"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 if str(BACKEND_DIR) not in sys.path:
@@ -67,7 +67,7 @@ class TestRootEndpoint:
         response = client.get("/")
         assert response.status_code == 200
         data = response.get_json()
-        assert data["name"] == "Sunnify API"
+        assert data["name"] == "Setlist API"
         assert "endpoints" in data
 
 

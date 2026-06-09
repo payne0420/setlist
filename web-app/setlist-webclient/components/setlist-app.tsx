@@ -36,7 +36,7 @@ interface Track {
   downloadLink: string
 }
 
-export default function SunnifyApp() {
+export default function SetlistApp() {
   const [playlistLink, setPlaylistLink] = useState("")
   const [downloadProgress, setDownloadProgress] = useState(0)
   const [songsDownloaded, setSongsDownloaded] = useState(0)
@@ -69,7 +69,7 @@ export default function SunnifyApp() {
 
     try {
       const response = await fetch(
-        "https://sunnify-spotify-downloader.onrender.com/api/scrape-playlist",
+        "https://setlist-spotify-downloader.onrender.com/api/scrape-playlist",
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -153,7 +153,7 @@ export default function SunnifyApp() {
             <span className="font-semibold">Preview mode:</span> This web app displays playlist
             metadata only. To download MP3s, use the{" "}
             <a
-              href="https://github.com/sunnypatell/sunnify-spotify-downloader/releases/latest"
+              href="https://github.com/payne0420/setlist/releases/latest"
               className="font-semibold underline hover:text-blue-100"
             >
               desktop app
@@ -175,7 +175,7 @@ export default function SunnifyApp() {
             </div>
             <div className="text-left">
               <h1 className="bg-gradient-to-r from-green-400 via-emerald-400 to-green-500 bg-clip-text text-5xl font-black tracking-tight text-transparent">
-                Sunnify
+                Setlist
               </h1>
               <p className="text-sm font-medium text-gray-400">Spotify Playlist Downloader</p>
             </div>
@@ -388,7 +388,7 @@ export default function SunnifyApp() {
 
               <div className="space-y-2">
                 <a
-                  href="https://github.com/sunnypatell/sunnify-spotify-downloader/releases/latest"
+                  href="https://github.com/payne0420/setlist/releases/latest"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="flex items-center justify-between rounded-xl bg-black/40 px-4 py-3 transition-all hover:bg-white/10"
@@ -400,7 +400,7 @@ export default function SunnifyApp() {
                   <ExternalLink className="h-4 w-4 text-gray-500" />
                 </a>
                 <a
-                  href="https://github.com/sunnypatell/sunnify-spotify-downloader/releases/latest"
+                  href="https://github.com/payne0420/setlist/releases/latest"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="flex items-center justify-between rounded-xl bg-black/40 px-4 py-3 transition-all hover:bg-white/10"
@@ -412,7 +412,7 @@ export default function SunnifyApp() {
                   <ExternalLink className="h-4 w-4 text-gray-500" />
                 </a>
                 <a
-                  href="https://github.com/sunnypatell/sunnify-spotify-downloader/releases/latest"
+                  href="https://github.com/payne0420/setlist/releases/latest"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="flex items-center justify-between rounded-xl bg-black/40 px-4 py-3 transition-all hover:bg-white/10"
@@ -428,10 +428,10 @@ export default function SunnifyApp() {
               <div className="mt-4 rounded-xl bg-black/40 p-3">
                 <p className="mb-1 text-xs font-semibold text-gray-500">Homebrew (macOS)</p>
                 <code className="block text-xs text-green-400">
-                  brew tap sunnypatell/sunnify
-                  https://github.com/sunnypatell/sunnify-spotify-downloader
+                  brew tap payne0420/setlist
+                  https://github.com/payne0420/setlist
                 </code>
-                <code className="block text-xs text-green-400">brew install --cask sunnify</code>
+                <code className="block text-xs text-green-400">brew install --cask setlist</code>
               </div>
             </div>
           </div>
@@ -447,7 +447,7 @@ export default function SunnifyApp() {
             {/* Sponsor Buttons */}
             <div className="flex items-center gap-3">
               <a
-                href="https://buymeacoffee.com/sunnypatell"
+                href="https://buymeacoffee.com/payne0420"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="flex items-center gap-2 rounded-xl bg-amber-500/10 px-4 py-2 text-sm font-medium text-amber-400 transition-all hover:bg-amber-500/20 hover:text-amber-300"
@@ -456,7 +456,7 @@ export default function SunnifyApp() {
                 Buy Me a Coffee
               </a>
               <a
-                href="https://github.com/sponsors/sunnypatell"
+                href="https://github.com/sponsors/payne0420"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="flex items-center gap-2 rounded-xl bg-pink-500/10 px-4 py-2 text-sm font-medium text-pink-400 transition-all hover:bg-pink-500/20 hover:text-pink-300"
@@ -469,7 +469,7 @@ export default function SunnifyApp() {
             {/* Social Links */}
             <div className="flex items-center gap-2">
               <a
-                href="https://github.com/sunnypatell/sunnify-spotify-downloader"
+                href="https://github.com/payne0420/setlist"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="rounded-xl p-3 text-gray-500 transition-all hover:bg-white/5 hover:text-white"

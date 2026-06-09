@@ -46,8 +46,8 @@ What changed and why? Include UX notes, endpoint changes, and config if relevant
 pytest tests/ -v
 python scripts/check_api_status.py
 python Spotify_Downloader.py
-cd web-app/sunnify-backend && python app.py
-cd web-app/sunnify-webclient && npm run dev
+cd web-app/setlist-backend && python app.py
+cd web-app/setlist-webclient && npm run dev
 ```
 
 Screenshots or console output (if applicable):

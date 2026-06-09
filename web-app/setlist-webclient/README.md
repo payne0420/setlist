@@ -1,8 +1,8 @@
 <div align="center">
 
-# Sunnify Web Client (Next.js)
+# Setlist Web Client (Next.js)
 
-<em>Frontend for the Sunnify stack. Built with Next.js 14, Tailwind CSS, and shadcn/ui.</em>
+<em>Frontend for the Setlist stack. Built with Next.js 14, Tailwind CSS, and shadcn/ui.</em>
 
 </div>
 
@@ -38,10 +38,10 @@ Open `http://localhost:3000`.
 The client points to the Render-hosted backend by default:
 
 ```
-https://sunnify-spotify-downloader.onrender.com/api/scrape-playlist
+https://setlist-spotify-downloader.onrender.com/api/scrape-playlist
 ```
 
-For local development, update `components/sunnify-app.tsx` or use environment variables.
+For local development, update `components/setlist-app.tsx` or use environment variables.
 
 ---
 

@@ -1,4 +1,4 @@
-"""Flask backend for Sunnify web client.
+"""Flask backend for Setlist web client.
 
 Lightweight API that fetches Spotify metadata without downloading.
 Optimized for free-tier hosting (512MB RAM, 0.1 CPU).
@@ -150,7 +150,7 @@ def index():
     """Root endpoint with API info."""
     return jsonify(
         {
-            "name": "Sunnify API",
+            "name": "Setlist API",
             "version": "2.0.7",
             "mode": "metadata-only",
             "description": "Fetches Spotify metadata. For MP3 downloads, use the desktop app.",

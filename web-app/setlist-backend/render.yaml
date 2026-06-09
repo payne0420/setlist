@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: sunnify-backend
+    name: setlist-backend
     runtime: python
     region: oregon
     plan: free

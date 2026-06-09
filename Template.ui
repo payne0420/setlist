@@ -11,7 +11,7 @@
    </rect>
   </property>
   <property name="windowTitle">
-   <string>Sunnify</string>
+   <string>Setlist</string>
   </property>
   <property name="styleSheet">
    <string notr="true"/>
@@ -56,7 +56,7 @@
        <item>
         <widget class="QLabel" name="title">
          <property name="text">
-          <string>Sunnify</string>
+          <string>Setlist</string>
          </property>
         </widget>
        </item>

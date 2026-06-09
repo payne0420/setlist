@@ -1,6 +1,6 @@
 <div align="center">
 
-# Contributing to Sunnify
+# Contributing to Setlist
 
 Thanks for considering a contribution. Whether it's a bug report, feature idea, doc fix, or code change, you're welcome here.
 
@@ -21,11 +21,11 @@ Thanks for considering a contribution. Whether it's a bug report, feature idea, 
 
 ```bash
 # clone your fork
-git clone https://github.com/<your-username>/sunnify-spotify-downloader.git
-cd sunnify-spotify-downloader
+git clone https://github.com/<your-username>/setlist-spotify-downloader.git
+cd setlist-spotify-downloader
 
 # add upstream remote
-git remote add upstream https://github.com/sunnypatell/sunnify-spotify-downloader.git
+git remote add upstream https://github.com/payne0420/setlist.git
 ```
 
 ### Desktop App (Python)
@@ -38,7 +38,7 @@ python Spotify_Downloader.py
 
 ### Backend (Flask)
 ```bash
-cd web-app/sunnify-backend
+cd web-app/setlist-backend
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python app.py
@@ -46,7 +46,7 @@ python app.py
 
 ### Webclient (Next.js)
 ```bash
-cd web-app/sunnify-webclient
+cd web-app/setlist-webclient
 npm install  # also installs husky hooks
 npm run dev
 ```
@@ -142,7 +142,7 @@ ruff check . --fix && ruff format .
 
 ### Webclient
 ```bash
-cd web-app/sunnify-webclient
+cd web-app/setlist-webclient
 
 # lint
 npm run lint
@@ -169,7 +169,7 @@ To run manually:
 pre-commit run --all-files
 
 # webclient
-cd web-app/sunnify-webclient && npx lint-staged
+cd web-app/setlist-webclient && npx lint-staged
 ```
 
 ---
@@ -232,7 +232,7 @@ cd web-app/sunnify-webclient && npx lint-staged
 
 > **⚠️ IMPORTANT: Educational Project Disclaimer**
 >
-> **Sunnify is a student portfolio project** developed for educational and demonstration purposes only. It exists to showcase software engineering skills including API integration, multi-threading, and cross-platform development.
+> **Setlist is a student portfolio project** developed for educational and demonstration purposes only. It exists to showcase software engineering skills including API integration, multi-threading, and cross-platform development.
 >
 > **By contributing to this project, you acknowledge that:**
 > - This project does not condone, encourage, or facilitate copyright infringement

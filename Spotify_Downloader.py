@@ -1656,7 +1656,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         try:
             os.makedirs(self.download_path, exist_ok=True)
             # Test write access
-            test_file = os.path.join(self.download_path, ".sunnify_test")
+            test_file = os.path.join(self.download_path, ".setlist_test")
             with open(test_file, "w") as f:
                 f.write("test")
             os.remove(test_file)

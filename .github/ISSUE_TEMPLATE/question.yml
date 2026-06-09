@@ -8,8 +8,8 @@ body:
     attributes:
       value: |
         **Before asking:**
-        - Check the [README](https://github.com/sunnypatell/sunnify-spotify-downloader#readme) for setup and usage
-        - Check [API_STATUS.md](https://github.com/sunnypatell/sunnify-spotify-downloader/blob/main/API_STATUS.md) for provider info
+        - Check the [README](https://github.com/payne0420/setlist#readme) for setup and usage
+        - Check [API_STATUS.md](https://github.com/payne0420/setlist/blob/main/API_STATUS.md) for provider info
         - Search existing issues for similar questions
 
   - type: dropdown

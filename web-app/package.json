@@ -1,15 +1,15 @@
 {
-  "name": "sunnify-web-app",
+  "name": "setlist-web-app",
   "version": "1.0.0",
   "private": true,
-  "description": "Web application monorepo for Sunnify (backend + webclient)",
+  "description": "Web application monorepo for Setlist (backend + webclient)",
   "scripts": {
-    "dev:backend": "cd sunnify-backend && python app.py",
-    "dev:webclient": "cd sunnify-webclient && npm run dev",
-    "build:webclient": "cd sunnify-webclient && npm run build",
-    "lint:webclient": "cd sunnify-webclient && npm run lint",
-    "typecheck:webclient": "cd sunnify-webclient && npm run typecheck",
-    "format:webclient": "cd sunnify-webclient && npm run format",
-    "format:check:webclient": "cd sunnify-webclient && npm run format:check"
+    "dev:backend": "cd setlist-backend && python app.py",
+    "dev:webclient": "cd setlist-webclient && npm run dev",
+    "build:webclient": "cd setlist-webclient && npm run build",
+    "lint:webclient": "cd setlist-webclient && npm run lint",
+    "typecheck:webclient": "cd setlist-webclient && npm run typecheck",
+    "format:webclient": "cd setlist-webclient && npm run format",
+    "format:check:webclient": "cd setlist-webclient && npm run format:check"
   }
 }

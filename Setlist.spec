@@ -1,16 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Cross-platform PyInstaller spec for Sunnify.
+Cross-platform PyInstaller spec for Setlist.
 
 Build commands:
-  macOS:   pyinstaller Sunnify.spec
-  Windows: pyinstaller Sunnify.spec
-  Linux:   pyinstaller Sunnify.spec
+  macOS:   pyinstaller Setlist.spec
+  Windows: pyinstaller Setlist.spec
+  Linux:   pyinstaller Setlist.spec
 
 Output:
-  macOS:   dist/Sunnify.app
-  Windows: dist/Sunnify.exe
-  Linux:   dist/Sunnify
+  macOS:   dist/Setlist.app
+  Windows: dist/Setlist.exe
+  Linux:   dist/Setlist
 """
 
 import sys
@@ -42,12 +42,12 @@ if is_windows:
             StringFileInfo([
                 StringTable('040904B0', [
                     StringStruct('CompanyName', 'Sunny Jayendra Patel'),
-                    StringStruct('FileDescription', 'Sunnify - Spotify Playlist Downloader'),
+                    StringStruct('FileDescription', 'Setlist - Spotify Playlist Downloader'),
                     StringStruct('FileVersion', '2.0.7.0'),
-                    StringStruct('InternalName', 'Sunnify'),
+                    StringStruct('InternalName', 'Setlist'),
                     StringStruct('LegalCopyright', 'Copyright (C) 2026 Sunny Jayendra Patel'),
-                    StringStruct('OriginalFilename', 'Sunnify.exe'),
-                    StringStruct('ProductName', 'Sunnify'),
+                    StringStruct('OriginalFilename', 'Setlist.exe'),
+                    StringStruct('ProductName', 'Setlist'),
                     StringStruct('ProductVersion', '2.0.7.0'),
                 ]),
             ]),
@@ -110,7 +110,7 @@ if is_mac:
         a.scripts,
         [],
         exclude_binaries=True,
-        name='Sunnify',
+        name='Setlist',
         debug=False,
         bootloader_ignore_signals=False,
         strip=False,
@@ -130,18 +130,18 @@ if is_mac:
         strip=False,
         upx=True,
         upx_exclude=[],
-        name='Sunnify',
+        name='Setlist',
     )
     app = BUNDLE(
         coll,
-        name='Sunnify.app',
+        name='Setlist.app',
         icon=icon_file,
-        bundle_identifier='com.sunnypatel.sunnify',
+        bundle_identifier='com.sunnypatel.setlist',
         info_plist={
-            'CFBundleName': 'Sunnify',
-            'CFBundleDisplayName': 'Sunnify',
+            'CFBundleName': 'Setlist',
+            'CFBundleDisplayName': 'Setlist',
             'CFBundleGetInfoString': 'Spotify Playlist Downloader',
-            'CFBundleIdentifier': 'com.sunnypatel.sunnify',
+            'CFBundleIdentifier': 'com.sunnypatel.setlist',
             'CFBundleVersion': '2.0.7',
             'CFBundleShortVersionString': '2.0.7',
             'NSHumanReadableCopyright': '© 2026 Sunny Jayendra Patel',
@@ -157,7 +157,7 @@ else:
         a.zipfiles,
         a.datas,
         [],
-        name='Sunnify',
+        name='Setlist',
         debug=False,
         bootloader_ignore_signals=False,
         strip=False,

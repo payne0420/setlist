@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: web-app/sunnify-webclient
+        working-directory: web-app/setlist-webclient
     steps:
       - uses: actions/checkout@v4
 
@@ -25,7 +25,7 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: web-app/sunnify-webclient/package-lock.json
+          cache-dependency-path: web-app/setlist-webclient/package-lock.json
 
       - name: Install dependencies
         run: npm ci
@@ -45,7 +45,7 @@ jobs:
     needs: quality
     defaults:
       run:
-        working-directory: web-app/sunnify-webclient
+        working-directory: web-app/setlist-webclient
     steps:
       - uses: actions/checkout@v4
 
@@ -54,7 +54,7 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: web-app/sunnify-webclient/package-lock.json
+          cache-dependency-path: web-app/setlist-webclient/package-lock.json
 
       - name: Install dependencies
         run: npm ci

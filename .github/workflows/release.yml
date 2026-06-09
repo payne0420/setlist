@@ -44,17 +44,17 @@ jobs:
           pip install pyinstaller
 
       - name: Build with PyInstaller
-        run: pyinstaller Sunnify.spec
+        run: pyinstaller Setlist.spec
 
       - name: Rename executable
         run: |
-          move dist\Sunnify.exe dist\Sunnify-Windows.exe
+          move dist\Setlist.exe dist\Setlist-Windows.exe
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-build
-          path: dist/Sunnify-Windows.exe
+          path: dist/Setlist-Windows.exe
 
   build-linux:
     name: Build Linux
@@ -100,18 +100,18 @@ jobs:
           pip install pyinstaller
 
       - name: Build with PyInstaller
-        run: pyinstaller Sunnify.spec
+        run: pyinstaller Setlist.spec
 
       - name: Rename and set permissions
         run: |
-          mv dist/Sunnify dist/Sunnify-Linux
-          chmod +x dist/Sunnify-Linux
+          mv dist/Setlist dist/Setlist-Linux
+          chmod +x dist/Setlist-Linux
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: linux-build
-          path: dist/Sunnify-Linux
+          path: dist/Setlist-Linux
 
   build-macos:
     name: Build macOS
@@ -144,18 +144,18 @@ jobs:
           pip install pyinstaller
 
       - name: Build with PyInstaller
-        run: pyinstaller Sunnify.spec
+        run: pyinstaller Setlist.spec
 
       - name: Create ZIP
         run: |
           cd dist
-          zip -r Sunnify-macOS.zip Sunnify.app
+          zip -r Setlist-macOS.zip Setlist.app
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: macos-build
-          path: dist/Sunnify-macOS.zip
+          path: dist/Setlist-macOS.zip
 
   upload-release:
     name: Upload to Release
@@ -177,9 +177,9 @@ jobs:
         with:
           tag_name: ${{ github.event.inputs.tag }}
           files: |
-            artifacts/windows-build/Sunnify-Windows.exe
-            artifacts/linux-build/Sunnify-Linux
-            artifacts/macos-build/Sunnify-macOS.zip
+            artifacts/windows-build/Setlist-Windows.exe
+            artifacts/linux-build/Setlist-Linux
+            artifacts/macos-build/Setlist-macOS.zip
 
   update-homebrew:
     name: Update Homebrew Cask
@@ -204,12 +204,12 @@ jobs:
 
           # Get the SHA256 from the release asset digest
           SHA256=$(gh api repos/${{ github.repository }}/releases/tags/${{ github.event.inputs.tag }} \
-            --jq '.assets[] | select(.name == "Sunnify-macOS.zip") | .digest' | sed 's/sha256://')
+            --jq '.assets[] | select(.name == "Setlist-macOS.zip") | .digest' | sed 's/sha256://')
 
           if [ -z "$SHA256" ]; then
             echo "Failed to get SHA256, calculating manually..."
-            gh release download ${{ github.event.inputs.tag }} --pattern "Sunnify-macOS.zip" --dir /tmp
-            SHA256=$(sha256sum /tmp/Sunnify-macOS.zip | cut -d' ' -f1)
+            gh release download ${{ github.event.inputs.tag }} --pattern "Setlist-macOS.zip" --dir /tmp
+            SHA256=$(sha256sum /tmp/Setlist-macOS.zip | cut -d' ' -f1)
           fi
 
           echo "sha256=$SHA256" >> $GITHUB_OUTPUT
@@ -226,19 +226,19 @@ jobs:
       - name: Update cask file
         run: |
           # Update version
-          sed -i 's/version "[^"]*"/version "${{ steps.version.outputs.version }}"/' Casks/sunnify.rb
+          sed -i 's/version "[^"]*"/version "${{ steps.version.outputs.version }}"/' Casks/setlist.rb
 
           # Update SHA256 (handles both quoted strings and :no_check symbol)
-          sed -i 's/sha256 "[^"]*"/sha256 "${{ steps.get-sha.outputs.sha256 }}"/' Casks/sunnify.rb
-          sed -i 's/sha256 :no_check/sha256 "${{ steps.get-sha.outputs.sha256 }}"/' Casks/sunnify.rb
+          sed -i 's/sha256 "[^"]*"/sha256 "${{ steps.get-sha.outputs.sha256 }}"/' Casks/setlist.rb
+          sed -i 's/sha256 :no_check/sha256 "${{ steps.get-sha.outputs.sha256 }}"/' Casks/setlist.rb
 
           echo "Updated cask file:"
-          cat Casks/sunnify.rb
+          cat Casks/setlist.rb
 
       - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Casks/sunnify.rb
+          git add Casks/setlist.rb
           git commit -m "chore(homebrew): auto-update cask to ${{ github.event.inputs.tag }}" || echo "No changes to commit"
           git push origin main

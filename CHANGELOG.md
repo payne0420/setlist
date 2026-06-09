@@ -5,7 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+> **Setlist** is a fork of [Sunnify](https://github.com/sunnypatell/sunnify-spotify-downloader)
+> by Sunny Patel. Entries for **2.0.7 and earlier are the upstream Sunnify
+> history**, preserved as-is; the compare links below point at upstream tags.
+> Work done in this fork lives under *Unreleased (Setlist fork)*.
+
+## [Unreleased] — Setlist fork
+
+### Added
+- **Multi-playlist download queue** — paste many Spotify playlist/album/track
+  URLs at once; they download sequentially, each into its own folder, with a
+  live per-item status panel (`QueueDialog`).
+- **Extended-mix mode** — optional setting that prefers extended / club cuts
+  over the radio edit, with a configurable length cap so it doesn't grab
+  hour-long mixes.
+- **Configurable filename order** — `Title - Artist` or `Artist - Track`.
+- **Max file-size cap** — discard an oversized download and try the next match.
+- **Restyled UI** — Spotify-dark theme + native title bar.
+
+### Changed
+- Rebranded the project to **Setlist** (app identity, config dir, default
+  download folder, package metadata, README). The original copyright and
+  attribution to Sunny Patel are retained per the project license.
+
+---
 
 ## [2.0.7] - 2026-05-26
 

@@ -2,7 +2,7 @@
 
 > **⚠️ Educational Project Notice**
 >
-> **Sunnify is a student portfolio project** developed for educational and demonstration purposes only. This security policy covers vulnerabilities in the codebase itself, not the legality of how the software might be used. For legal terms and disclaimers, see [DISCLAIMER.md](DISCLAIMER.md).
+> **Setlist is a student portfolio project** developed for educational and demonstration purposes only. This security policy covers vulnerabilities in the codebase itself, not the legality of how the software might be used. For legal terms and disclaimers, see [DISCLAIMER.md](DISCLAIMER.md).
 
 ---
 
@@ -20,7 +20,7 @@ We currently support the active development branch and the latest 2.x release li
 
 ## Reporting a Vulnerability
 
-Please report security issues privately by emailing `sunnypatell124555@gmail.com` with the subject line `[SECURITY] <short description>`.
+Please report security issues privately by emailing `payne0420124555@gmail.com` with the subject line `[SECURITY] <short description>`.
 
 Include:
 - A clear description of the issue and potential impact

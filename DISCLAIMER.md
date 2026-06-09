@@ -2,7 +2,7 @@
 
 ## ⚠️ Important Notice
 
-**Sunnify (Spotify Downloader)** is a **student portfolio project** developed for **educational and demonstration purposes only**.
+**Setlist (Spotify Downloader)** is a **student portfolio project** developed for **educational and demonstration purposes only**.
 
 ---
 
@@ -103,7 +103,7 @@ I will respond to valid takedown requests promptly.
 
 ## Acknowledgment
 
-By downloading, installing, or using Sunnify, you confirm that you have read, understood, and agree to this disclaimer in its entirety.
+By downloading, installing, or using Setlist, you confirm that you have read, understood, and agree to this disclaimer in its entirety.
 
 ---
 
