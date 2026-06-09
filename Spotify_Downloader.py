@@ -33,9 +33,6 @@ import requests
 from mutagen.easyid3 import EasyID3
 from mutagen.id3 import APIC, ID3
 from PyQt5.QtCore import (
-    QEasingCurve,
-    QPropertyAnimation,
-    QSize,
     Qt,
     QThread,
     QTimer,
@@ -44,9 +41,9 @@ from PyQt5.QtCore import (
 )
 from PyQt5.QtGui import QCursor, QImage, QPixmap
 from PyQt5.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -60,6 +57,7 @@ from PyQt5.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
+    QWidget,
 )
 from yt_dlp import YoutubeDL
 
@@ -86,7 +84,7 @@ from spotifydown_api import (
     extract_playlist_id,
     sanitize_filename,
 )
-from Template import Ui_MainWindow
+from ui_main import Ui_MainWindow
 
 
 def get_ffmpeg_path():
@@ -1468,14 +1466,13 @@ class SettingsDialog(QDialog):
         return self._config
 
 
-class QueueDialog(QDialog):
-    """Non-modal panel to paste many Spotify URLs and watch them download.
+class QueuePanel(QWidget):
+    """Embeddable panel to paste many Spotify URLs and watch them download.
 
-    Built programmatically with real layouts (not via the pyuic-generated
-    Template.py), so it sits cleanly alongside the modernized main window. It
-    holds NO download logic: it parses / queues / starts / stops / clears
-    through the controller (MainWindow) and re-renders its list from the
-    controller's DownloadQueue snapshot whenever the controller asks it to.
+    Lives as a page inside the main window's content stack. It holds NO
+    download logic: it parses / queues / starts / stops / clears through the
+    controller (MainWindow) and re-renders its list from the controller's
+    DownloadQueue snapshot whenever the controller asks it to.
     """
 
     _STATUS_ICON = {
@@ -1488,13 +1485,8 @@ class QueueDialog(QDialog):
     }
 
     def __init__(self, controller):
-        super().__init__(controller)
+        super().__init__()
         self._controller = controller
-        self.setWindowTitle("Download Queue")
-        # Qt.Tool keeps the panel floating above the main window and out of the
-        # taskbar; it stays recoverable rather than getting lost behind it.
-        self.setWindowFlags(Qt.Tool)
-        self.setMinimumSize(460, 440)
 
         intro = QLabel(
             "Paste Spotify playlist / album / track URLs — one per line "
@@ -1509,22 +1501,36 @@ class QueueDialog(QDialog):
             "https://open.spotify.com/album/...\n"
             "https://open.spotify.com/track/..."
         )
-        self._paste.setMinimumHeight(90)
+        self._paste.setMinimumHeight(96)
 
         self._add_btn = QPushButton("Add to queue")
+        self._add_btn.setObjectName("QueueBtn")
+        self._add_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self._add_btn.clicked.connect(self._on_add)
         add_row = QHBoxLayout()
         add_row.addStretch(1)
         add_row.addWidget(self._add_btn)
 
         self._list = QListWidget()
+        self._list.setObjectName("trackList")
+        self._list.setSelectionMode(QAbstractItemView.NoSelection)
+        self._list.setFocusPolicy(Qt.NoFocus)
 
         self._start_btn = QPushButton("Start")
+        self._start_btn.setObjectName("DownloadBtn")
+        self._start_btn.setMinimumHeight(38)
+        self._start_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self._start_btn.clicked.connect(lambda: self._controller.start_queue())
         self._stop_btn = QPushButton("Stop")
+        self._stop_btn.setObjectName("QueueBtn")
+        self._stop_btn.setMinimumHeight(38)
+        self._stop_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self._stop_btn.clicked.connect(lambda: self._controller.stop_queue())
         self._stop_btn.setEnabled(False)
         self._clear_btn = QPushButton("Clear")
+        self._clear_btn.setObjectName("QueueBtn")
+        self._clear_btn.setMinimumHeight(38)
+        self._clear_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self._clear_btn.clicked.connect(lambda: self._controller.clear_queue())
         btn_row = QHBoxLayout()
         btn_row.addWidget(self._start_btn)
@@ -1533,9 +1539,12 @@ class QueueDialog(QDialog):
         btn_row.addWidget(self._clear_btn)
 
         self._summary = QLabel("")
+        self._summary.setObjectName("statusMsg")
         self._summary.setWordWrap(True)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
         layout.addWidget(intro)
         layout.addWidget(self._paste)
         layout.addLayout(add_row)
@@ -1570,15 +1579,6 @@ class QueueDialog(QDialog):
     def set_summary(self, text):
         self._summary.setText(text)
 
-    def closeEvent(self, event):
-        # Never destroy the dialog while a queue is running — its slots still
-        # write to these widgets. Hide instead; MainWindow keeps a strong ref.
-        if self._controller.queue_is_running():
-            event.ignore()
-            self.hide()
-        else:
-            super().closeEvent(event)
-
 
 # Main Window
 class MainWindow(QMainWindow, Ui_MainWindow):
@@ -1608,28 +1608,35 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self._queue_halted = False  # set by Stop so the finished handler won't auto-advance
         self.queue_dialog = None
 
-        self._panel_open_width = 340
-        self._panel_height = 480
-        self._window_narrow_width = 430
-        self._window_wide_width = self._window_narrow_width + self._panel_open_width + 20
+        # Live per-track download list (Home) + the row currently downloading.
+        self._current_track_item = None
+        self._current_track_label = ""
 
         self.PlaylistLink.returnPressed.connect(self.on_returnButton)
         self.DownloadBtn.clicked.connect(self.on_returnButton)
 
         self.showPreviewCheck.stateChanged.connect(self.show_preview)
+        self.show_preview(self.showPreviewCheck.checkState())  # apply initial state
 
         self.Select_Home.clicked.connect(self.Linkedin)
         self.SettingsBtn.clicked.connect(self.open_settings)
 
-        # Queue button: opens the non-modal multi-playlist panel. Added into the
-        # frame's layout (right under the URL row) rather than the generated
-        # Template.py, so it flows with the modernized layout-managed UI.
-        self.QueueBtn = QPushButton("⬇  Download Queue")
-        self.QueueBtn.setObjectName("QueueBtn")
-        self.QueueBtn.setMinimumHeight(34)
-        self.QueueBtn.setCursor(QCursor(Qt.PointingHandCursor))
+        # Sidebar navigation switches the content stack. Settings opens a dialog.
+        self.navHome.clicked.connect(lambda: self.content.setCurrentIndex(0))
+        self.navQueue.clicked.connect(self.open_queue_dialog)
+        self.navHistory.clicked.connect(lambda: self.content.setCurrentIndex(2))
+
+        # Queue is an embedded page now. The controller drives it through
+        # self.queue_dialog (refresh / set_running / set_summary), the same
+        # interface the old floating dialog exposed.
+        self.queue_dialog = QueuePanel(self)
+        self.queuePageLayout.addWidget(self.queue_dialog, 1)
+
+        # The Home "Add to Download Queue" button jumps to the Queue page.
         self.QueueBtn.clicked.connect(self.open_queue_dialog)
-        self._insert_queue_button()
+
+        # History page.
+        self.clearHistoryBtn.clicked.connect(self.clear_history)
 
         # Hide the Album row in the preview panel: Spotify's unauthenticated
         # embed endpoints do not expose album name anywhere we can reach it,
@@ -1833,6 +1840,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
         self.statusMsg.setText(f"Detected: {url_type}")
         self._mode = "single"
+        self.reset_track_list()
+        self.content.setCurrentIndex(0)
+        self.navHome.setChecked(True)
         self.DownloadBtn.setText("Stop")
         self.DownloadBtn.setEnabled(True)
         self._cancel_event = threading.Event()
@@ -1862,27 +1872,12 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         # UI resets when item_finished -> _on_single_finished fires.
 
     # ---------------------------------------------------------------- queue ---
-    def _insert_queue_button(self):
-        """Place the Queue button in the frame layout, just under the URL row."""
-        layout = getattr(self, "frameLayout", None)
-        if layout is None:
-            return
-        insert_at = layout.count()
-        for i in range(layout.count()):
-            if layout.itemAt(i).layout() is getattr(self, "urlRow", None):
-                insert_at = i + 1
-                break
-        layout.insertWidget(insert_at, self.QueueBtn)
-
     def open_queue_dialog(self):
-        """Show the non-modal multi-playlist queue panel (created lazily)."""
-        if self.queue_dialog is None:
-            self.queue_dialog = QueueDialog(self)
+        """Switch to the embedded Queue page and refresh it."""
         self._refresh_queue_dialog()
         self.queue_dialog.set_running(self.queue_is_running())
-        self.queue_dialog.show()
-        self.queue_dialog.raise_()
-        self.queue_dialog.activateWindow()
+        self.content.setCurrentIndex(1)
+        self.navQueue.setChecked(True)
 
     def queue_is_running(self):
         # A single-download stop also enters "stopping"; only report the queue
@@ -1919,6 +1914,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             return
         self._mode = "queue"
         self._queue_halted = False
+        self.reset_track_list()
         self.DownloadBtn.setText("Stop Queue")
         self.DownloadBtn.setEnabled(True)
         self.SettingsBtn.setEnabled(False)  # freeze settings while a queue runs
@@ -2060,10 +2056,13 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             self.YearText.setText(song_meta.get("releaseDate", ""))
 
         self.MainSongName.setText(song_meta.get("title", "") + " - " + song_meta.get("artists", ""))
+        self._add_track_row(song_meta.get("title", ""), song_meta.get("artists", ""))
         # NOTE: Meta tags are written in add_song_META (after file exists), not here
 
     @pyqtSlot(dict)
     def add_song_META(self, song_meta):
+        # Each emit means a file finished writing -> mark the current track done.
+        self._mark_track_done()
         if self.AddMetaDataCheck.isChecked():
             meta_thread = WritingMetaTagsThread(song_meta, song_meta["file"])
             meta_thread.tags_success.connect(lambda x: self.statusMsg.setText(f"{x}"))
@@ -2095,43 +2094,45 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
     @pyqtSlot(int)
     def update_song_progress(self, progress):
-        self.SongDownloadprogressBar.setValue(progress)
         self.SongDownloadprogress.setValue(progress)
 
     @pyqtSlot(int)
     def Reset_song_progress(self, progress):
-        self.SongDownloadprogressBar.setValue(0)
         self.SongDownloadprogress.setValue(0)
 
-    def CloseSongInformation(self):
-        self.animation = QPropertyAnimation(self.SONGINFORMATION, b"size")
-        self.animation.setDuration(250)
-        self.animation.setEndValue(QSize(0, self._panel_height))
-        self.animation.setEasingCurve(QEasingCurve.InOutQuad)
-        self.animation.finished.connect(self._shrink_window_after_close)
-        self.animation.start()
+    # ---- live track list (Home) + session history ----
+    def reset_track_list(self):
+        """Clear the live track list at the start of a fresh download."""
+        self.trackList.clear()
+        self._current_track_item = None
+        self._current_track_label = ""
 
-    def _shrink_window_after_close(self):
-        self.setFixedWidth(self._window_narrow_width)
-        if hasattr(self, "animation"):
-            try:
-                self.animation.finished.disconnect(self._shrink_window_after_close)
-            except TypeError:
-                pass
+    def _add_track_row(self, title, artists):
+        label = f"{title} — {artists}" if artists else (title or "Unknown track")
+        item = QListWidgetItem(f"⬇   {label}")
+        self.trackList.addItem(item)
+        self.trackList.scrollToBottom()
+        self._current_track_item = item
+        self._current_track_label = label
 
-    def OpenSongInformation(self):
-        self.setFixedWidth(self._window_wide_width)
-        self.animation = QPropertyAnimation(self.SONGINFORMATION, b"size")
-        self.animation.setDuration(350)
-        self.animation.setEndValue(QSize(self._panel_open_width, self._panel_height))
-        self.animation.setEasingCurve(QEasingCurve.InOutQuad)
-        self.animation.start()
+    def _mark_track_done(self):
+        if self._current_track_item is not None:
+            with contextlib.suppress(RuntimeError):  # row may have been cleared mid-flight
+                self._current_track_item.setText(f"✓   {self._current_track_label}")
+            QListWidgetItem(f"✓   {self._current_track_label}", self.historyList)
+            self._current_track_item = None
+
+    def clear_history(self):
+        self.historyList.clear()
 
     def show_preview(self, state):
-        if state == 2:  # 2 corresponds to checked state
-            self.OpenSongInformation()
-        else:
-            self.CloseSongInformation()
+        """Toggle the inline cover/meta preview inside the now-playing card.
+
+        Accepts either a Qt.CheckState or the raw int (2 == checked) that
+        QCheckBox.stateChanged emits."""
+        on = int(state) == int(Qt.Checked)
+        self.previewBox.setVisible(on)
+        self.MainSongName.setVisible(not on)
 
     def Linkedin(self):
         webbrowser.open("https://www.linkedin.com/in/sunny-patel-30b460204/")
@@ -2143,7 +2144,5 @@ if __name__ == "__main__":
     theme.apply(app)
     Screen = MainWindow()
     Screen.setWindowTitle("Setlist")
-    Screen.setFixedHeight(520)
-    Screen.setFixedWidth(Screen._window_narrow_width)
     Screen.show()
     sys.exit(app.exec())

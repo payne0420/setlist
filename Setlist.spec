@@ -76,7 +76,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ('spotifydown_api.py', '.'),
-        ('Template.py', '.'),
+        ('ui_main.py', '.'),
         ('theme.py', '.'),
         ('assets', 'assets'),
     ] + ffmpeg_datas,

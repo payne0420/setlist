@@ -200,25 +200,30 @@ QPushButton#QueueBtn:disabled {{
     border-color: {COLORS["input_border"]};
 }}
 
-QPushButton#SettingsBtn {{
+/* Sidebar navigation buttons (Home / Queue / History / Settings) */
+QPushButton[nav="true"] {{
     background-color: transparent;
     color: {COLORS["text_secondary"]};
     border: none;
     border-radius: 8px;
-    font-size: 16px;
-    padding: 4px 8px;
-    min-width: 32px;
-    min-height: 32px;
+    font-size: 13px;
+    text-align: left;
+    padding: 9px 12px;
 }}
 
-QPushButton#SettingsBtn:hover {{
+QPushButton[nav="true"]:hover {{
     color: {COLORS["text_primary"]};
     background-color: {COLORS["hover"]};
 }}
 
-QPushButton#SettingsBtn:pressed {{
+QPushButton[nav="true"]:checked {{
     color: {COLORS["text_primary"]};
-    background-color: {COLORS["input_border"]};
+    background-color: {COLORS["hover"]};
+    font-weight: 600;
+}}
+
+QPushButton[nav="true"]:disabled {{
+    color: {COLORS["text_tertiary"]};
 }}
 
 QPushButton#Select_Home {{
@@ -236,6 +241,115 @@ QPushButton#Select_Home:hover {{
 
 QPushButton#Select_Home:pressed {{
     color: {COLORS["accent"]};
+}}
+
+/* ---- Redesign: sidebar shell, content pages, cards, lists ---- */
+QStackedWidget#content {{
+    background-color: {COLORS["base"]};
+}}
+
+QFrame#sidebar {{
+    background-color: {COLORS["surface"]};
+    border: none;
+    border-right: 1px solid {COLORS["hover"]};
+}}
+
+QLabel#wordmark {{
+    font-size: 18px;
+    font-weight: 700;
+    color: {COLORS["text_primary"]};
+}}
+
+QLabel#pageTitle {{
+    font-size: 22px;
+    font-weight: 700;
+    color: {COLORS["text_primary"]};
+}}
+
+QLabel#sectionLabel {{
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    color: {COLORS["text_secondary"]};
+}}
+
+QFrame#card {{
+    background-color: {COLORS["surface"]};
+    border: 1px solid {COLORS["hover"]};
+    border-radius: 12px;
+}}
+
+QFrame#previewBox {{
+    background-color: transparent;
+    border: none;
+}}
+
+QListWidget#trackList {{
+    background-color: transparent;
+    border: none;
+    outline: none;
+}}
+
+QListWidget#trackList::item {{
+    padding: 7px 10px;
+    margin: 1px 0;
+    border-radius: 8px;
+    color: {COLORS["text_primary"]};
+}}
+
+QListWidget#trackList::item:hover {{
+    background-color: {COLORS["hover"]};
+}}
+
+/* Dark, minimal scrollbars (were native/unstyled before) */
+QScrollBar:vertical {{
+    background: transparent;
+    width: 10px;
+    margin: 2px;
+}}
+
+QScrollBar::handle:vertical {{
+    background: {COLORS["input_border"]};
+    border-radius: 4px;
+    min-height: 28px;
+}}
+
+QScrollBar::handle:vertical:hover {{
+    background: {COLORS["text_tertiary"]};
+}}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+    height: 0;
+    background: none;
+}}
+
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+    background: none;
+}}
+
+QScrollBar:horizontal {{
+    background: transparent;
+    height: 10px;
+    margin: 2px;
+}}
+
+QScrollBar::handle:horizontal {{
+    background: {COLORS["input_border"]};
+    border-radius: 4px;
+    min-width: 28px;
+}}
+
+QScrollBar::handle:horizontal:hover {{
+    background: {COLORS["text_tertiary"]};
+}}
+
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+    width: 0;
+    background: none;
+}}
+
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+    background: none;
 }}
 
 QCheckBox {{
@@ -465,9 +579,7 @@ class ThemedComboBox(QtWidgets.QComboBox):
         super().showPopup()
         popup = self.view().window()
         popup.setWindowFlags(
-            QtCore.Qt.Popup
-            | QtCore.Qt.FramelessWindowHint
-            | QtCore.Qt.NoDropShadowWindowHint
+            QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint | QtCore.Qt.NoDropShadowWindowHint
         )
         popup.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         popup.setAttribute(QtCore.Qt.WA_NoSystemBackground, True)
