@@ -2,6 +2,6 @@
 FileVersion: 2,0,7,0
 ProductVersion: 2,0,7,0
 CompanyName: Sunny Jayendra Patel
-FileDescription: Sunnify (Spotify Downloader)
-InternalName: Sunnify (Spotify Downloader)
-LegalCopyright: Copyright (C) 2026 Sunny Jayendra Patel
+FileDescription: Setlist (Spotify Downloader) — a fork of Sunnify
+InternalName: Setlist
+LegalCopyright: Copyright (C) 2026 Sunny Jayendra Patel (original Sunnify work)

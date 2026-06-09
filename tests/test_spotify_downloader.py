@@ -1676,7 +1676,7 @@ class TestMainWindow:
         # This test is limited since MainWindow requires QApplication
         # Just test the logic would produce a valid path format
         home = os.path.expanduser("~")
-        expected_contains = os.path.join(home, "Music", "Sunnify")
+        expected_contains = os.path.join(home, "Music", "Setlist")
         # The path should be under user's home
         assert home in expected_contains
 

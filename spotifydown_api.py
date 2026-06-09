@@ -431,7 +431,7 @@ class SpotifyEmbedAPI:
             # Manual executor lifecycle so GeneratorExit (caller break on cancel)
             # can shut the pool down with cancel_futures=True instead of blocking
             # on ~700 pending HTTP fetches inside the implicit __exit__.
-            pool = _cf.ThreadPoolExecutor(max_workers=4, thread_name_prefix="sunnify-meta")
+            pool = _cf.ThreadPoolExecutor(max_workers=4, thread_name_prefix="setlist-meta")
             try:
                 future_to_info = {
                     pool.submit(self._fetch_track_metadata, tid): (tid, uri) for tid, uri in pending

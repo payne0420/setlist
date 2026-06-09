@@ -1,17 +1,21 @@
 [project]
-name = "sunnify-spotify-downloader"
+name = "setlist"
 version = "2.0.7"
-description = "Spotify playlist downloader with PyQt5 GUI, Flask backend, and Next.js web client"
+description = "Setlist — Spotify→YouTube downloader (PyQt5) with a multi-playlist queue and extended-mix mode. A fork of Sunnify."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Custom - Educational Use Only" }
-authors = [{ name = "Sunny Jayendra Patel", email = "sunnypatell124555@gmail.com" }]
-keywords = ["spotify", "downloader", "playlist", "music", "pyqt5"]
+# Original work by Sunny Jayendra Patel (Sunnify); this fork retains that
+# attribution per the project license.
+authors = [{ name = "Sunny Jayendra Patel" }]
+maintainers = [{ name = "payne0420 (Setlist fork)" }]
+keywords = ["spotify", "downloader", "playlist", "music", "pyqt5", "queue"]
 
 [project.urls]
-homepage = "https://github.com/sunnypatell/sunnify-spotify-downloader"
-repository = "https://github.com/sunnypatell/sunnify-spotify-downloader"
-issues = "https://github.com/sunnypatell/sunnify-spotify-downloader/issues"
+homepage = "https://github.com/payne0420/setlist"
+repository = "https://github.com/payne0420/setlist"
+issues = "https://github.com/payne0420/setlist/issues"
+upstream = "https://github.com/sunnypatell/sunnify-spotify-downloader"
 
 # ruff - modern python linter + formatter (replaces black, isort, flake8)
 [tool.ruff]

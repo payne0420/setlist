@@ -202,10 +202,10 @@ class Ui_MainWindow(object):
 
     def retranslateUi(self, MainWindow):
         _translate = QtCore.QCoreApplication.translate
-        MainWindow.setWindowTitle(_translate("MainWindow", "Sunnify"))
-        self.title.setText(_translate("MainWindow", "Sunnify"))
+        MainWindow.setWindowTitle(_translate("MainWindow", "Setlist"))
+        self.title.setText(_translate("MainWindow", "Setlist"))
         self.SettingsBtn.setText(_translate("MainWindow", "⚙"))
-        self.author.setText(_translate("MainWindow", "Created by Sunny Patel"))
+        self.author.setText(_translate("MainWindow", "A fork of Sunnify by Sunny Patel"))
         self.version.setText(_translate("MainWindow", "v2.0.7"))
         self.PlaylistLink.setPlaceholderText(_translate("MainWindow", "Paste Spotify URL"))
         self.DownloadBtn.setText(_translate("MainWindow", "Download"))

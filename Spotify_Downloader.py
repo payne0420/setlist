@@ -1,7 +1,11 @@
 #
 """
-Sunnify (Spotify Downloader)
-Copyright (C) 2024 Sunny Patel <sunnypatel124555@gmail.com>
+Setlist — a Spotify→YouTube downloader.
+
+A fork of Sunnify (Spotify Downloader) by Sunny Patel, diverged to add a
+multi-playlist download queue, extended-mix mode, configurable filename order,
+size/length caps, and a restyled UI. Original work © 2024 Sunny Patel; this
+fork retains that copyright per the project license (see LICENSE).
 
 EDUCATIONAL PROJECT DISCLAIMER:
 This software is a student portfolio project developed for educational purposes only.
@@ -136,7 +140,7 @@ SUPPORTED_QUALITIES = ("128", "192", "256", "320")
 # before fetching their metadata, so a huge playlist throttled by Spotify's
 # rate limit can be finished across several sessions instead of one long sit
 # (closes #40).
-MANIFEST_FILENAME = ".sunnify-manifest.jsonl"
+MANIFEST_FILENAME = ".setlist-manifest.jsonl"
 
 
 def _config_dir() -> str:
@@ -149,7 +153,7 @@ def _config_dir() -> str:
         base = os.path.join(os.path.expanduser("~"), "Library", "Application Support")
     else:
         base = os.environ.get("XDG_CONFIG_HOME", os.path.join(os.path.expanduser("~"), ".config"))
-    path = os.path.join(base, "Sunnify")
+    path = os.path.join(base, "Setlist")
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -326,7 +330,7 @@ class MusicScraper(QThread):
             if character.isalnum() or character in [" ", "_"]
         ).strip()
         if not safe_name:
-            safe_name = "Sunnify Playlist"
+            safe_name = "Setlist Playlist"
         playlist_folder = os.path.join(base_folder, safe_name)
         os.makedirs(playlist_folder, exist_ok=True)
         return playlist_folder
@@ -1320,7 +1324,7 @@ class SettingsDialog(QDialog):
 
     def __init__(self, parent, config: dict):
         super().__init__(parent)
-        self.setWindowTitle("Sunnify Settings")
+        self.setWindowTitle("Setlist Settings")
         self.setModal(True)
         # Min width + resizable so the full path fits on any screen; wider
         # default because macOS path strings are long (`/Users/.../Music/...`).
@@ -1427,13 +1431,13 @@ class SettingsDialog(QDialog):
             QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
         )
         if folder:
-            # Only append "Sunnify" when the user picked a non-Sunnify folder,
+            # Only append "Setlist" when the user picked a non-Setlist folder,
             # otherwise re-selecting the existing destination creates nested
-            # Sunnify/Sunnify/... paths.
+            # Setlist/Setlist/... paths.
             chosen = (
                 folder
-                if os.path.basename(folder.rstrip(os.sep)) == "Sunnify"
-                else os.path.join(folder, "Sunnify")
+                if os.path.basename(folder.rstrip(os.sep)) == "Setlist"
+                else os.path.join(folder, "Setlist")
             )
             self._folder_label.setText(chosen)
             self._folder_label.setCursorPosition(0)
@@ -1629,7 +1633,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         """Get a sensible default download path that's writable."""
         # Try user's Music folder first
         home = os.path.expanduser("~")
-        music_folder = os.path.join(home, "Music", "Sunnify")
+        music_folder = os.path.join(home, "Music", "Setlist")
 
         # On Windows, Music might be in a different location
         if sys.platform == "win32":
@@ -1640,10 +1644,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
                     winreg.HKEY_CURRENT_USER,
                     r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders",
                 )
-                music_folder = os.path.join(winreg.QueryValueEx(key, "My Music")[0], "Sunnify")
+                music_folder = os.path.join(winreg.QueryValueEx(key, "My Music")[0], "Setlist")
                 winreg.CloseKey(key)
             except Exception:
-                music_folder = os.path.join(home, "Music", "Sunnify")
+                music_folder = os.path.join(home, "Music", "Setlist")
 
         return music_folder
 
@@ -1669,13 +1673,13 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
         )
         if folder:
-            # Keep downloads contained in a "Sunnify" subfolder, but avoid
-            # creating nested Sunnify/Sunnify/... paths when the user picked
-            # a folder that's already named Sunnify.
-            if os.path.basename(folder.rstrip(os.sep)) == "Sunnify":
+            # Keep downloads contained in a "Setlist" subfolder, but avoid
+            # creating nested Setlist/Setlist/... paths when the user picked
+            # a folder that's already named Setlist.
+            if os.path.basename(folder.rstrip(os.sep)) == "Setlist":
                 self.download_path = folder
             else:
-                self.download_path = os.path.join(folder, "Sunnify")
+                self.download_path = os.path.join(folder, "Setlist")
             self._download_path_set = True
             self._config["download_path"] = self.download_path
             save_config(self._config)
@@ -2129,7 +2133,7 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     theme.apply(app)
     Screen = MainWindow()
-    Screen.setWindowTitle("Sunnify")
+    Screen.setWindowTitle("Setlist")
     Screen.setFixedHeight(520)
     Screen.setFixedWidth(Screen._window_narrow_width)
     Screen.show()

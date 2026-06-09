@@ -1,4 +1,4 @@
-"""Spotify dark theme — single source of styling for Sunnify."""
+"""Spotify dark theme — single source of styling for Setlist."""
 
 import os
 import sys

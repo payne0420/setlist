@@ -1,4 +1,4 @@
-"""Shared fixtures for Sunnify tests."""
+"""Shared fixtures for Setlist tests."""
 
 from __future__ import annotations
 
