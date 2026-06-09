@@ -57,6 +57,7 @@ from PyQt5.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -85,7 +86,7 @@ from spotifydown_api import (
     extract_playlist_id,
     sanitize_filename,
 )
-from ui_main import INPUT_H, Ui_MainWindow
+from ui_main import Ui_MainWindow
 
 
 def get_ffmpeg_path():
@@ -1358,6 +1359,7 @@ class SettingsPanel(QWidget):
         for key in SUPPORTED_FORMATS:
             self._format_cb.addItem(key)
         self._format_cb.setCurrentText(cfg.get("format", "mp3"))
+        self._format_cb.setFixedHeight(40)
         self._format_cb.currentTextChanged.connect(self._on_format_change)
         self._format_cb.currentTextChanged.connect(lambda t: self._save("format", t))
 
@@ -1365,21 +1367,23 @@ class SettingsPanel(QWidget):
         for q in SUPPORTED_QUALITIES:
             self._quality_cb.addItem(f"{q} kbps")
         self._quality_cb.setCurrentText(f"{cfg.get('quality', '192')} kbps")
+        self._quality_cb.setFixedHeight(40)
         self._quality_cb.currentTextChanged.connect(lambda t: self._save("quality", t.split()[0]))
 
         self._filename_order_cb = theme.ThemedComboBox()
         self._filename_order_cb.addItem("Title - Artist")
         self._filename_order_cb.addItem("Artist - Title")
         self._filename_order_cb.setCurrentIndex(1 if cfg.get("artist_first") else 0)
+        self._filename_order_cb.setFixedHeight(40)
         self._filename_order_cb.currentIndexChanged.connect(
             lambda i: self._save("artist_first", i == 1)
         )
 
         out_card, out_form = self._card()
         out_form.addRow("Download folder", folder_row)
-        out_form.addRow("Audio format", self._format_cb)
-        out_form.addRow("Audio quality", self._quality_cb)
-        out_form.addRow("Filename order", self._filename_order_cb)
+        out_form.addRow("Audio format", self._field(self._format_cb, 210))
+        out_form.addRow("Audio quality", self._field(self._quality_cb, 210))
+        out_form.addRow("Filename order", self._field(self._filename_order_cb, 210))
 
         # ---- Matching card ----
         self._extended_mix_cb = QCheckBox("Prefer extended / club mix versions")
@@ -1391,7 +1395,7 @@ class SettingsPanel(QWidget):
         self._max_extended_minutes_spin.setRange(1, 180)
         self._max_extended_minutes_spin.setValue(int(cfg.get("max_extended_minutes", 20)))
         self._max_extended_minutes_spin.setSuffix(" min")
-        self._max_extended_minutes_spin.setFixedHeight(36)
+        self._max_extended_minutes_spin.setFixedHeight(40)
         self._max_extended_minutes_spin.setToolTip(
             "Reject an extended candidate longer than this (guards against "
             "grabbing an hour-long mix instead of the real extended cut)."
@@ -1405,7 +1409,7 @@ class SettingsPanel(QWidget):
         self._max_track_mb_spin.setValue(int(cfg.get("max_track_mb", 0)))
         self._max_track_mb_spin.setSpecialValueText("No limit")  # shown when value == 0
         self._max_track_mb_spin.setSuffix(" MB")
-        self._max_track_mb_spin.setFixedHeight(36)
+        self._max_track_mb_spin.setFixedHeight(40)
         self._max_track_mb_spin.setToolTip(
             "Discard any download whose file exceeds this size and try the next "
             "match. 0 = no limit."
@@ -1414,8 +1418,10 @@ class SettingsPanel(QWidget):
 
         match_card, match_form = self._card()
         match_form.addRow(self._extended_mix_cb)  # span full width, left-aligned
-        match_form.addRow("Max extended-mix length", self._max_extended_minutes_spin)
-        match_form.addRow("Max file size", self._max_track_mb_spin)
+        match_form.addRow(
+            "Max extended-mix length", self._field(self._max_extended_minutes_spin, 150)
+        )
+        match_form.addRow("Max file size", self._field(self._max_track_mb_spin, 150))
 
         body.addWidget(self._section("OUTPUT"))
         body.addWidget(out_card)
@@ -1442,6 +1448,16 @@ class SettingsPanel(QWidget):
         lbl = QLabel(text)
         lbl.setObjectName("sectionLabel")
         return lbl
+
+    def _field(self, widget, width):
+        row = QWidget()
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        widget.setFixedWidth(width)
+        lay.addWidget(widget)
+        lay.addStretch(1)
+        return row
 
     def _save(self, key, value):
         self._controller.apply_setting(key, value)
@@ -1516,6 +1532,7 @@ class QueuePanel(QWidget):
             "https://open.spotify.com/track/..."
         )
         self._paste.setMinimumHeight(96)
+        self._paste.setMaximumHeight(120)
 
         self._add_btn = QPushButton("Add to queue")
         self._add_btn.setObjectName("QueueBtn")
@@ -1525,32 +1542,58 @@ class QueuePanel(QWidget):
         add_row.addStretch(1)
         add_row.addWidget(self._add_btn)
 
+        self._empty_page = QWidget()
+        empty_layout = QVBoxLayout(self._empty_page)
+        empty_layout.setContentsMargins(0, 0, 0, 0)
+        empty_layout.setSpacing(6)
+        empty_layout.addStretch(1)
+        empty_glyph = QLabel("♪")
+        empty_glyph.setObjectName("queueEmptyGlyph")
+        empty_glyph.setAlignment(Qt.AlignCenter)
+        empty_layout.addWidget(empty_glyph)
+        empty_title = QLabel("No items queued yet")
+        empty_title.setObjectName("queueEmptyTitle")
+        empty_title.setAlignment(Qt.AlignCenter)
+        empty_layout.addWidget(empty_title)
+        empty_hint = QLabel("Paste links above, then hit Add to queue")
+        empty_hint.setObjectName("queueEmptyHint")
+        empty_hint.setAlignment(Qt.AlignCenter)
+        empty_layout.addWidget(empty_hint)
+        empty_layout.addStretch(1)
+
         self._list = QListWidget()
         self._list.setObjectName("trackList")
         self._list.setSelectionMode(QAbstractItemView.NoSelection)
         self._list.setFocusPolicy(Qt.NoFocus)
 
+        self._list_stack = QStackedWidget()
+        self._list_stack.addWidget(self._empty_page)
+        self._list_stack.addWidget(self._list)
+
+        # Action bar — its own compact styling (objectNames queueStartBtn /
+        # queueStopBtn / queueClearBtn), distinct from the larger pill on Home so
+        # three buttons in a row read as a tidy toolbar, not fat touching pills.
         self._start_btn = QPushButton("Start")
-        self._start_btn.setObjectName("DownloadBtn")
-        self._start_btn.setFixedHeight(INPUT_H)
-        self._start_btn.setMinimumWidth(130)
+        self._start_btn.setObjectName("queueStartBtn")
+        self._start_btn.setFixedHeight(40)
+        self._start_btn.setMinimumWidth(104)
         self._start_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self._start_btn.clicked.connect(lambda: self._controller.start_queue())
         self._stop_btn = QPushButton("Stop")
-        self._stop_btn.setObjectName("QueueBtn")
-        self._stop_btn.setFixedHeight(INPUT_H)
-        self._stop_btn.setMinimumWidth(110)
+        self._stop_btn.setObjectName("queueStopBtn")
+        self._stop_btn.setFixedHeight(40)
+        self._stop_btn.setMinimumWidth(92)
         self._stop_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self._stop_btn.clicked.connect(lambda: self._controller.stop_queue())
         self._stop_btn.setEnabled(False)
         self._clear_btn = QPushButton("Clear")
-        self._clear_btn.setObjectName("QueueBtn")
-        self._clear_btn.setFixedHeight(INPUT_H)
-        self._clear_btn.setMinimumWidth(110)
+        self._clear_btn.setObjectName("queueClearBtn")
+        self._clear_btn.setFixedHeight(40)
+        self._clear_btn.setMinimumWidth(92)
         self._clear_btn.setCursor(QCursor(Qt.PointingHandCursor))
         self._clear_btn.clicked.connect(lambda: self._controller.clear_queue())
         btn_row = QHBoxLayout()
-        btn_row.setSpacing(12)  # space between Start and Stop
+        btn_row.setSpacing(12)  # comfortable gap between Start and Stop
         btn_row.addWidget(self._start_btn)
         btn_row.addWidget(self._stop_btn)
         btn_row.addStretch(1)
@@ -1566,7 +1609,7 @@ class QueuePanel(QWidget):
         layout.addWidget(intro)
         layout.addWidget(self._paste)
         layout.addLayout(add_row)
-        layout.addWidget(self._list, 1)
+        layout.addWidget(self._list_stack, 1)
         layout.addWidget(self._summary)
         layout.addLayout(btn_row)
 
@@ -1583,10 +1626,14 @@ class QueuePanel(QWidget):
     def refresh(self, items):
         """Rebuild the list from a DownloadQueue snapshot (id-addressed, so a
         full rebuild can never update the wrong row)."""
+        if not items:
+            self._list_stack.setCurrentWidget(self._empty_page)
+            return
         self._list.clear()
         for it in items:
             icon = self._STATUS_ICON.get(it.status, "•")
             QListWidgetItem(f"{icon}   {it.display_name}    ·  {it.kind}", self._list)
+        self._list_stack.setCurrentWidget(self._list)
 
     def set_running(self, running):
         self._start_btn.setEnabled(not running)

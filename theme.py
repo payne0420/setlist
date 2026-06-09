@@ -82,7 +82,12 @@ QLabel#label_6, QLabel#label_9, QLabel#label_11, QLabel#label_8 {{
     text-transform: uppercase;
 }}
 
-QLabel#AlbumName, QLabel#statusMsg, QLabel#CounterLabel,
+QLabel#AlbumName {{
+    font-size: 13px;
+    color: {COLORS["text_secondary"]};
+}}
+
+QLabel#statusMsg, QLabel#CounterLabel,
 QLabel#SongName, QLabel#YearText, QLabel#ArtistNameText, QLabel#AlbumText {{
     font-size: 13px;
     color: {COLORS["text_primary"]};
@@ -113,6 +118,14 @@ QLineEdit#PlaylistLink {{
 
 QLineEdit#PlaylistLink:focus {{
     border: 1px solid {COLORS["focus"]};
+}}
+
+QLineEdit#PlaylistLink:read-only {{
+    border: 1px solid {COLORS["input_border"]};
+}}
+
+QLineEdit#PlaylistLink:read-only:focus {{
+    border: 1px solid {COLORS["input_border"]};
 }}
 
 /* Multi-playlist queue dialog: paste box + queue list */
@@ -201,11 +214,61 @@ QPushButton#QueueBtn:disabled {{
     border-color: {COLORS["input_border"]};
 }}
 
+/* Queue action bar — compact, refined buttons (not the big Home pill) so a
+   row of three reads as a tidy toolbar instead of fat touching pills. */
+QPushButton#queueStartBtn {{
+    background-color: {COLORS["accent"]};
+    color: {COLORS["download_text"]};
+    border: none;
+    border-radius: 10px;
+    font-size: 13px;
+    font-weight: 700;
+    padding: 8px 22px;
+}}
+
+QPushButton#queueStartBtn:hover {{
+    background-color: {COLORS["accent_hover"]};
+}}
+
+QPushButton#queueStartBtn:pressed {{
+    background-color: {COLORS["accent_pressed"]};
+}}
+
+QPushButton#queueStartBtn:disabled {{
+    background-color: {COLORS["input_border"]};
+    color: {COLORS["text_tertiary"]};
+}}
+
+QPushButton#queueStopBtn, QPushButton#queueClearBtn {{
+    background-color: {COLORS["input_bg"]};
+    color: {COLORS["text_primary"]};
+    border: 1px solid {COLORS["input_border"]};
+    border-radius: 10px;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 8px 22px;
+}}
+
+QPushButton#queueStopBtn:hover, QPushButton#queueClearBtn:hover {{
+    background-color: {COLORS["hover"]};
+    border-color: {COLORS["text_tertiary"]};
+}}
+
+QPushButton#queueStopBtn:pressed, QPushButton#queueClearBtn:pressed {{
+    background-color: {COLORS["input_border"]};
+}}
+
+QPushButton#queueStopBtn:disabled, QPushButton#queueClearBtn:disabled {{
+    color: {COLORS["text_tertiary"]};
+    border-color: {COLORS["input_border"]};
+}}
+
 /* Sidebar navigation buttons (Home / Queue / History / Settings) */
 QPushButton[nav="true"] {{
     background-color: transparent;
     color: {COLORS["text_secondary"]};
     border: none;
+    border-left: 3px solid transparent;
     border-radius: 8px;
     font-size: 13px;
     text-align: left;
@@ -220,6 +283,7 @@ QPushButton[nav="true"]:hover {{
 QPushButton[nav="true"]:checked {{
     color: {COLORS["text_primary"]};
     background-color: {COLORS["hover"]};
+    border-left: 3px solid {COLORS["accent"]};
     font-weight: 600;
 }}
 
@@ -285,6 +349,12 @@ QFrame#previewBox {{
     border: none;
 }}
 
+QFrame#cardDivider {{
+    background-color: {COLORS["hover"]};
+    border: none;
+    max-height: 1px;
+}}
+
 /* Settings pane: form row labels read as muted text, controls stand out */
 QWidget#settingsPage QFrame#card QLabel {{
     color: {COLORS["text_secondary"]};
@@ -306,6 +376,22 @@ QListWidget#trackList::item {{
 
 QListWidget#trackList::item:hover {{
     background-color: {COLORS["hover"]};
+}}
+
+QLabel#queueEmptyGlyph {{
+    font-size: 44px;
+    color: {COLORS["text_tertiary"]};
+}}
+
+QLabel#queueEmptyTitle {{
+    font-size: 15px;
+    font-weight: 600;
+    color: {COLORS["text_secondary"]};
+}}
+
+QLabel#queueEmptyHint {{
+    font-size: 13px;
+    color: {COLORS["text_tertiary"]};
 }}
 
 /* Dark, minimal scrollbars (were native/unstyled before) */
@@ -457,9 +543,10 @@ QSpinBox:focus {{
 
 QSpinBox::up-button, QSpinBox::down-button {{
     subcontrol-origin: border;
-    width: 20px;
+    width: 22px;
     background-color: {COLORS["hover"]};
     border: none;
+    border-left: 1px solid {COLORS["input_border"]};
 }}
 
 QSpinBox::up-button {{
@@ -478,13 +565,13 @@ QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
 
 QSpinBox::up-arrow {{
     image: url({_CHEVRON_UP});
-    width: 10px;
+    width: 11px;
     height: 7px;
 }}
 
 QSpinBox::down-arrow {{
     image: url({_CHEVRON_DOWN});
-    width: 10px;
+    width: 11px;
     height: 7px;
 }}
 
@@ -580,15 +667,19 @@ class ThemedComboBox(QtWidgets.QComboBox):
     opaque white system window (the "white halo"/frame around the dropdown).
     Making that popup window frameless + translucent lets only the styled view
     show, with transparent corners instead of white.
+
+    On macOS, WA_TranslucentBackground must be set *before* setWindowFlags:
+    changing flags recreates the native window, and it is recreated opaque
+    unless the translucency attributes are already in place.
     """
 
     def showPopup(self):
         super().showPopup()
         popup = self.view().window()
+        popup.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        popup.setAttribute(QtCore.Qt.WA_NoSystemBackground, True)
         popup.setWindowFlags(
             QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint | QtCore.Qt.NoDropShadowWindowHint
         )
-        popup.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
-        popup.setAttribute(QtCore.Qt.WA_NoSystemBackground, True)
         # setWindowFlags hides the window; re-show so the new flags take effect.
         popup.show()

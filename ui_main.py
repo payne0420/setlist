@@ -142,11 +142,6 @@ class Ui_MainWindow:
         card.setContentsMargins(16, 14, 16, 14)
         card.setSpacing(8)
 
-        self.AlbumName = QtWidgets.QLabel(self.nowCard)
-        self.AlbumName.setObjectName("AlbumName")
-        self.AlbumName.setWordWrap(True)
-        card.addWidget(self.AlbumName)
-
         self.PlaylistMsg_2 = QtWidgets.QLabel(self.nowCard)
         self.PlaylistMsg_2.setObjectName("PlaylistMsg_2")
         card.addWidget(self.PlaylistMsg_2)
@@ -155,6 +150,11 @@ class Ui_MainWindow:
         self.MainSongName.setObjectName("MainSongName")
         self.MainSongName.setWordWrap(True)
         card.addWidget(self.MainSongName)
+
+        self.AlbumName = QtWidgets.QLabel(self.nowCard)
+        self.AlbumName.setObjectName("AlbumName")
+        self.AlbumName.setWordWrap(True)
+        card.addWidget(self.AlbumName)
 
         # Inline preview (cover + meta), toggled by Show preview.
         self.previewBox = QtWidgets.QFrame(self.nowCard)
@@ -184,6 +184,12 @@ class Ui_MainWindow:
         prev.addLayout(meta, 1)
         card.addWidget(self.previewBox)
         self.previewBox.setVisible(False)
+
+        cardDivider = QtWidgets.QFrame(self.nowCard)
+        cardDivider.setObjectName("cardDivider")
+        cardDivider.setFrameShape(QtWidgets.QFrame.HLine)
+        cardDivider.setFixedHeight(1)
+        card.addWidget(cardDivider)
 
         # Engine sets these but they have no place in the new layout — keep them
         # as hidden children so the existing setText calls are harmless.
@@ -306,9 +312,9 @@ class Ui_MainWindow:
         )
         self.DownloadBtn.setText(_t("MainWindow", "Download"))
         self.QueueBtn.setText(_t("MainWindow", "⬇  Add to Download Queue"))
-        self.AlbumName.setText(_t("MainWindow", "No playlist loaded"))
         self.PlaylistMsg_2.setText(_t("MainWindow", "NOW PLAYING"))
-        self.MainSongName.setText(_t("MainWindow", "—"))
+        self.MainSongName.setText(_t("MainWindow", "Nothing playing"))
+        self.AlbumName.setText(_t("MainWindow", "Paste a Spotify link to get started"))
         self.showPreviewCheck.setText(_t("MainWindow", "Show preview"))
         self.AddMetaDataCheck.setText(_t("MainWindow", "Add meta tags"))
         self.CounterLabel.setText(_t("MainWindow", "Songs downloaded 0"))
