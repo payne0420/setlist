@@ -8,9 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > **Setlist** is a fork of [Sunnify](https://github.com/sunnypatell/sunnify-spotify-downloader)
 > by Sunny Patel. Entries for **2.0.7 and earlier are the upstream Sunnify
 > history**, preserved as-is; the compare links below point at upstream tags.
-> Work done in this fork lives under *Unreleased (Setlist fork)*.
+> 2.1.0 is the first release of the Setlist fork.
 
-## [Unreleased] — Setlist fork
+## [Unreleased]
+
+## [2.1.0] - 2026-06-09
+
+First Setlist release — the fork's accumulated work since diverging from
+Sunnify 2.0.7.
 
 ### Added
 - **Multi-playlist download queue** — paste many Spotify playlist/album/track
@@ -198,7 +203,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Node 20+ for webclient
 - FFmpeg + yt-dlp for audio processing
 
-[Unreleased]: https://github.com/sunnypatell/sunnify-spotify-downloader/compare/v2.0.7...HEAD
+[Unreleased]: https://github.com/payne0420/setlist/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/payne0420/setlist/releases/tag/v2.1.0
 [2.0.7]: https://github.com/sunnypatell/sunnify-spotify-downloader/compare/v2.0.6...v2.0.7
 [2.0.6]: https://github.com/sunnypatell/sunnify-spotify-downloader/compare/v2.0.5...v2.0.6
 [2.0.5]: https://github.com/sunnypatell/sunnify-spotify-downloader/compare/v2.0.4...v2.0.5

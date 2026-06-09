@@ -30,8 +30,8 @@ if is_windows:
     )
     win_version_info = VSVersionInfo(
         ffi=FixedFileInfo(
-            filevers=(2, 0, 7, 0),
-            prodvers=(2, 0, 7, 0),
+            filevers=(2, 1, 0, 0),
+            prodvers=(2, 1, 0, 0),
             mask=0x3F,
             flags=0x0,
             OS=0x40004,       # VOS_NT_WINDOWS32
@@ -43,12 +43,12 @@ if is_windows:
                 StringTable('040904B0', [
                     StringStruct('CompanyName', 'Sunny Jayendra Patel'),
                     StringStruct('FileDescription', 'Setlist - Spotify Playlist Downloader'),
-                    StringStruct('FileVersion', '2.0.7.0'),
+                    StringStruct('FileVersion', '2.1.0.0'),
                     StringStruct('InternalName', 'Setlist'),
                     StringStruct('LegalCopyright', 'Copyright (C) 2026 Sunny Jayendra Patel'),
                     StringStruct('OriginalFilename', 'Setlist.exe'),
                     StringStruct('ProductName', 'Setlist'),
-                    StringStruct('ProductVersion', '2.0.7.0'),
+                    StringStruct('ProductVersion', '2.1.0.0'),
                 ]),
             ]),
             VarFileInfo([VarStruct('Translation', [0x0409, 0x04B0])]),
@@ -142,8 +142,8 @@ if is_mac:
             'CFBundleDisplayName': 'Setlist',
             'CFBundleGetInfoString': 'Spotify Playlist Downloader',
             'CFBundleIdentifier': 'com.sunnypatel.setlist',
-            'CFBundleVersion': '2.0.7',
-            'CFBundleShortVersionString': '2.0.7',
+            'CFBundleVersion': '2.1.0',
+            'CFBundleShortVersionString': '2.1.0',
             'NSHumanReadableCopyright': '© 2026 Sunny Jayendra Patel',
             'NSHighResolutionCapable': True,
         },

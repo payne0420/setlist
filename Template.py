@@ -206,7 +206,7 @@ class Ui_MainWindow(object):
         self.title.setText(_translate("MainWindow", "Setlist"))
         self.SettingsBtn.setText(_translate("MainWindow", "⚙"))
         self.author.setText(_translate("MainWindow", "A fork of Sunnify by Sunny Patel"))
-        self.version.setText(_translate("MainWindow", "v2.0.7"))
+        self.version.setText(_translate("MainWindow", "v2.1.0"))
         self.PlaylistLink.setPlaceholderText(_translate("MainWindow", "Paste Spotify URL"))
         self.DownloadBtn.setText(_translate("MainWindow", "Download"))
         self.AlbumName.setText(_translate("MainWindow", "Playlist Name :"))
