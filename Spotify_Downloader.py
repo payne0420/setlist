@@ -64,6 +64,8 @@ from PyQt5.QtWidgets import (
 from yt_dlp import YoutubeDL
 
 import theme
+import track_selectors
+from backends import DEFAULT_DOWNLOAD_SOURCE, KNOWN_DOWNLOAD_SOURCES, make_backend
 from download_queue import (
     ACTIVE,
     CANCELLED,
@@ -175,6 +177,7 @@ def load_config() -> dict:
         "max_extended_minutes": 20,
         "max_track_mb": 0,
         "artist_first": False,
+        "download_source": DEFAULT_DOWNLOAD_SOURCE,
     }
     try:
         with open(_config_path(), encoding="utf-8") as f:
@@ -200,6 +203,8 @@ def load_config() -> dict:
         except (TypeError, ValueError):
             mb = 0
         defaults["max_track_mb"] = mb  # 0 = no file-size limit
+        if defaults["download_source"] not in KNOWN_DOWNLOAD_SOURCES:
+            defaults["download_source"] = DEFAULT_DOWNLOAD_SOURCE
         return defaults
     except (OSError, json.JSONDecodeError):
         return defaults
@@ -241,6 +246,7 @@ class MusicScraper(QThread):
         max_extended_minutes: int = 20,
         max_track_mb: int = 0,
         artist_first: bool = False,
+        download_source: str = DEFAULT_DOWNLOAD_SOURCE,
     ):
         super().__init__()
         self.counter = 0  # Initialize counter to zero
@@ -276,6 +282,10 @@ class MusicScraper(QThread):
         # that only makes sense for a single active download.
         self._parallel_mode = False
         self._total_tracks = 0
+        # Pluggable audio source (YouTube by default). The fetch seam in
+        # _download_one_track / scrape_track routes through this.
+        self.download_source = download_source
+        self._backend = make_backend(download_source, scraper=self)
 
     def is_cancelled(self) -> bool:
         """Check if cancellation has been requested."""
@@ -371,29 +381,24 @@ class MusicScraper(QThread):
     # The top YouTube hit is often the music video (extra intro/skit/outro) or
     # an extended/remix cut, which plays as a different song even though the
     # filename is right. Matching on duration steers us to the real audio.
-    _DURATION_TOLERANCE_S = 7
-    _EXTENDED_TITLE_KEYWORDS = ("extended", "club mix")
-    _EXTENDED_MAX_RATIO = 2.5  # an extended cut is longer than the edit but never an hour-long mix
-    _DEFAULT_MAX_EXTENDED_MINUTES = 20
-    _RADIO_EDIT_RE = re.compile(
-        r"\s*(?:\(\s*radio\s*edit\s*\)|\[\s*radio\s*edit\s*\]|[-–—]\s*radio\s*edit\b)\s*",
-        re.IGNORECASE,
-    )
+    # Selection heuristics live in track_selectors so every backend shares one
+    # implementation; these aliases keep the existing internal references valid.
+    _DURATION_TOLERANCE_S = track_selectors.DURATION_TOLERANCE_S
+    _EXTENDED_TITLE_KEYWORDS = track_selectors.EXTENDED_TITLE_KEYWORDS
+    _EXTENDED_MAX_RATIO = track_selectors.EXTENDED_MAX_RATIO
+    _DEFAULT_MAX_EXTENDED_MINUTES = track_selectors.DEFAULT_MAX_EXTENDED_MINUTES
+    _RADIO_EDIT_RE = track_selectors.RADIO_EDIT_RE
 
     @staticmethod
     def _strip_radio_edit(title: str) -> str:
         """Remove a "Radio Edit" version descriptor from a title (used only in
         extended-mix mode, where we fetch a longer cut). Leaves the rest of the
         title — including unrelated words like "Radio Ga Ga" — intact."""
-        cleaned = MusicScraper._RADIO_EDIT_RE.sub(" ", title)
-        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
-        cleaned = cleaned.strip(" -–—")
-        return cleaned if cleaned else title
+        return track_selectors.strip_radio_edit(title)
 
     @classmethod
     def _extended_title_boost(cls, entry: dict) -> int:
-        title = (entry.get("title") or "").lower()
-        return int(any(kw in title for kw in cls._EXTENDED_TITLE_KEYWORDS))
+        return int(track_selectors.title_boost(entry.get("title") or ""))
 
     def _meta_title(self, track_title: str) -> str:
         """Title written to the file's metadata tags and shown in the preview.
@@ -450,60 +455,21 @@ class MusicScraper(QThread):
         if not entries:
             return None
 
+        # Map yt-dlp flat entries onto the backend-independent candidate shape and
+        # defer to the shared selector so YouTube and future backends agree.
+        cands = [
+            {"id": e["id"], "title": e.get("title") or "", "duration_s": e.get("duration")}
+            for e in entries
+        ]
         if prefer_extended:
-            timed = [e for e in entries if e.get("duration")]
-            if expected_duration_s:
-                lower = expected_duration_s + self._DURATION_TOLERANCE_S
-                upper = min(
-                    expected_duration_s * self._EXTENDED_MAX_RATIO, self.max_track_duration_s
-                )
-                longer = [
-                    e
-                    for e in timed
-                    if self._extended_title_boost(e) and lower < e["duration"] <= upper
-                ]
-                if longer:
-                    chosen = max(longer, key=lambda e: e["duration"])
-                    return f"https://www.youtube.com/watch?v={chosen['id']}"
-                # No genuinely-longer cut (e.g. the Spotify track is ALREADY the extended
-                # version): take the keyworded candidate closest to the expected length
-                # within [expected/ratio, upper]. Else give up so the caller falls back.
-                lo = expected_duration_s / self._EXTENDED_MAX_RATIO
-                near = [
-                    e
-                    for e in timed
-                    if self._extended_title_boost(e) and lo <= e["duration"] <= upper
-                ]
-                if near:
-                    chosen = min(near, key=lambda e: abs(e["duration"] - expected_duration_s))
-                    return f"https://www.youtube.com/watch?v={chosen['id']}"
-                return None
-            else:
-                # No Spotify duration to gate on: NEVER take an unbounded top hit. Require
-                # the extended keyword AND a sane single-track length; pick the most
-                # relevant (first) such result, else return None to fall back.
-                sane_kw = [
-                    e
-                    for e in timed
-                    if self._extended_title_boost(e) and e["duration"] <= self.max_track_duration_s
-                ]
-                if sane_kw:
-                    chosen = sane_kw[0]
-                    return f"https://www.youtube.com/watch?v={chosen['id']}"
-                return None
+            chosen_id = track_selectors.select_extended(
+                cands, expected_duration_s, self.max_track_duration_s
+            )
         else:
-            chosen = entries[0]
-            if expected_duration_s:
-                top_duration = chosen.get("duration")
-                top_off = top_duration is None or (
-                    abs(top_duration - expected_duration_s) > self._DURATION_TOLERANCE_S
-                )
-                # Only look past the top hit when its length is clearly wrong.
-                if top_off:
-                    timed = [e for e in entries if e.get("duration")]
-                    if timed:
-                        chosen = min(timed, key=lambda e: abs(e["duration"] - expected_duration_s))
-        return f"https://www.youtube.com/watch?v={chosen['id']}"
+            chosen_id = track_selectors.select_normal(cands, expected_duration_s)
+        if not chosen_id:
+            return None
+        return f"https://www.youtube.com/watch?v={chosen_id}"
 
     def _build_youtube_download_plan(self, search_query, fallback_query=None):
         prefer_extended = self.extended_mix
@@ -752,21 +718,15 @@ class MusicScraper(QThread):
                 self._finish_track_ui(ok=True)
                 return None
 
-            normal_query = f"ytsearch1:{track_title} {artists} audio"
-            expected_dur = (track.duration_ms / 1000) if track.duration_ms else None
             try:
-                if self.extended_mix:
-                    search_query = self._extended_search_query(track_title, artists)
-                    final_path, used_extended = self.download_track_audio(
-                        search_query,
-                        filepath,
-                        expected_duration_s=expected_dur,
-                        fallback_query=normal_query,
-                    )
-                else:
-                    final_path, used_extended = self.download_track_audio(
-                        normal_query, filepath, expected_duration_s=expected_dur
-                    )
+                final_path, _actual_ext, used_extended = self._backend.fetch(
+                    track=track,
+                    destination=filepath,
+                    extended=self.extended_mix,
+                    audio_format=self.audio_format,
+                    audio_quality=self.audio_quality,
+                    cancel=self.is_cancelled,
+                )
             except Exception as error_status:
                 error_msg = self._get_user_friendly_error(error_status, track_title)
                 self.error_signal.emit(error_msg)
@@ -945,6 +905,10 @@ class MusicScraper(QThread):
         # Small playlists don't benefit from parallelism. Keep 1 worker for
         # playlists under 3 tracks to preserve the single-track UI feel.
         worker_count = 1 if len(tracks) < 3 else min(self.MAX_WORKERS, len(tracks))
+        # Clamp to what the active backend can safely run in parallel (e.g. a
+        # single-session backend declares max_concurrency = 1). YouTube = 4, so
+        # this is a no-op for the default source.
+        worker_count = min(worker_count, getattr(self._backend, "max_concurrency", self.MAX_WORKERS))
         self._parallel_mode = worker_count > 1
 
         if worker_count == 1:
@@ -1061,22 +1025,16 @@ class MusicScraper(QThread):
             self.PlaylistCompleted.emit("Track already exists!")
             return
 
-        # Download via YouTube search
-        normal_query = f"ytsearch1:{track_title} {artists} audio"
-        expected_dur = (track.duration_ms / 1000) if track.duration_ms else None
+        # Download via the configured backend (YouTube by default).
         try:
-            if self.extended_mix:
-                search_query = self._extended_search_query(track_title, artists)
-                final_path, used_extended = self.download_track_audio(
-                    search_query,
-                    filepath,
-                    expected_duration_s=expected_dur,
-                    fallback_query=normal_query,
-                )
-            else:
-                final_path, used_extended = self.download_track_audio(
-                    normal_query, filepath, expected_duration_s=expected_dur
-                )
+            final_path, _actual_ext, used_extended = self._backend.fetch(
+                track=track,
+                destination=filepath,
+                extended=self.extended_mix,
+                audio_format=self.audio_format,
+                audio_quality=self.audio_quality,
+                cancel=self.is_cancelled,
+            )
         except Exception as error_status:
             error_msg = self._get_user_friendly_error(error_status, track_title)
             print(f"[*] Error downloading '{track_title}': {error_status}")
@@ -1133,6 +1091,7 @@ class ScraperThread(QThread):
         max_extended_minutes: int = 20,
         max_track_mb: int = 0,
         artist_first: bool = False,
+        download_source: str = DEFAULT_DOWNLOAD_SOURCE,
     ):
         super().__init__()
         self.spotify_link = spotify_link
@@ -1147,6 +1106,7 @@ class ScraperThread(QThread):
             max_extended_minutes=max_extended_minutes,
             max_track_mb=max_track_mb,
             artist_first=artist_first,
+            download_source=download_source,
         )
         # Capture the terminal status string synchronously IN the worker thread.
         # PlaylistCompleted is emitted from run()'s thread; a DirectConnection
@@ -1355,6 +1315,21 @@ class SettingsPanel(QWidget):
         folder_row.addWidget(self._folder_field, 1)
         folder_row.addWidget(choose)
 
+        # Download source. Each entry is (display label, config value). Follow-on
+        # backends append their own ("lossless", "librespot") here.
+        self._source_options = [("YouTube", "youtube")]
+        self._source_cb = theme.ThemedComboBox()
+        for label, _val in self._source_options:
+            self._source_cb.addItem(label)
+        _cur_source = cfg.get("download_source", "youtube")
+        self._source_cb.setCurrentIndex(
+            next((i for i, (_, v) in enumerate(self._source_options) if v == _cur_source), 0)
+        )
+        self._source_cb.setFixedHeight(40)
+        self._source_cb.currentIndexChanged.connect(
+            lambda i: self._save("download_source", self._source_options[i][1])
+        )
+
         self._format_cb = theme.ThemedComboBox()
         for key in SUPPORTED_FORMATS:
             self._format_cb.addItem(key)
@@ -1381,6 +1356,7 @@ class SettingsPanel(QWidget):
 
         out_card, out_form = self._card()
         out_form.addRow("Download folder", folder_row)
+        out_form.addRow("Download source", self._field(self._source_cb, 210))
         out_form.addRow("Audio format", self._field(self._format_cb, 210))
         out_form.addRow("Audio quality", self._field(self._quality_cb, 210))
         out_form.addRow("Filename order", self._field(self._filename_order_cb, 210))
@@ -1824,6 +1800,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             max_extended_minutes=self._config.get("max_extended_minutes", 20),
             max_track_mb=self._config.get("max_track_mb", 0),
             artist_first=self._config.get("artist_first", False),
+            download_source=self._config.get("download_source", DEFAULT_DOWNLOAD_SOURCE),
         )
         self.scraper_thread = thread
         self._active_threads.append(thread)  # strong ref until fully finished
