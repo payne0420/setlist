@@ -1621,10 +1621,14 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.Select_Home.clicked.connect(self.Linkedin)
         self.SettingsBtn.clicked.connect(self.open_settings)
 
-        # Sidebar navigation switches the content stack. Settings opens a dialog.
-        self.navHome.clicked.connect(lambda: self.content.setCurrentIndex(0))
-        self.navQueue.clicked.connect(self.open_queue_dialog)
-        self.navHistory.clicked.connect(lambda: self.content.setCurrentIndex(2))
+        # Sidebar navigation switches the content stack. Drive it off `toggled`
+        # rather than `clicked`: the buttons are checkable and exclusive, and
+        # `toggled` fires for every activation path — mouse, keyboard (Space),
+        # and assistive tech. (VoiceOver's AXPress flips the checked state but
+        # does NOT emit `clicked`, so a clicked-based wiring is dead for AT.)
+        self.navHome.toggled.connect(lambda on: self.content.setCurrentIndex(0) if on else None)
+        self.navQueue.toggled.connect(lambda on: self._show_queue_page() if on else None)
+        self.navHistory.toggled.connect(lambda on: self.content.setCurrentIndex(2) if on else None)
 
         # Queue is an embedded page now. The controller drives it through
         # self.queue_dialog (refresh / set_running / set_summary), the same
@@ -1644,6 +1648,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         # a permanently empty label.
         self.label_8.hide()
         self.AlbumText.hide()
+
+        # Idle placeholder in the (empty) track list.
+        self.reset_track_list()
 
     def _get_default_download_path(self):
         """Get a sensible default download path that's writable."""
@@ -1872,12 +1879,18 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         # UI resets when item_finished -> _on_single_finished fires.
 
     # ---------------------------------------------------------------- queue ---
-    def open_queue_dialog(self):
-        """Switch to the embedded Queue page and refresh it."""
+    def _show_queue_page(self):
+        """Refresh + show the embedded Queue page (content stack index 1)."""
         self._refresh_queue_dialog()
         self.queue_dialog.set_running(self.queue_is_running())
         self.content.setCurrentIndex(1)
-        self.navQueue.setChecked(True)
+
+    def open_queue_dialog(self):
+        """Jump to the Queue page via the sidebar nav (e.g. from the Home CTA)."""
+        if self.navQueue.isChecked():
+            self._show_queue_page()  # already selected — just refresh/show
+        else:
+            self.navQueue.setChecked(True)  # fires toggled -> _show_queue_page
 
     def queue_is_running(self):
         # A single-download stop also enters "stopping"; only report the queue
@@ -2102,12 +2115,19 @@ class MainWindow(QMainWindow, Ui_MainWindow):
 
     # ---- live track list (Home) + session history ----
     def reset_track_list(self):
-        """Clear the live track list at the start of a fresh download."""
+        """Clear the live track list and show the idle placeholder hint."""
         self.trackList.clear()
         self._current_track_item = None
         self._current_track_label = ""
+        hint = QListWidgetItem("Tracks will appear here as they download")
+        hint.setFlags(Qt.NoItemFlags)  # non-interactive, dimmed
+        self.trackList.addItem(hint)
+        self._tracks_placeholder = True
 
     def _add_track_row(self, title, artists):
+        if getattr(self, "_tracks_placeholder", False):
+            self.trackList.clear()  # drop the idle hint before the first real row
+            self._tracks_placeholder = False
         label = f"{title} — {artists}" if artists else (title or "Unknown track")
         item = QListWidgetItem(f"⬇   {label}")
         self.trackList.addItem(item)
