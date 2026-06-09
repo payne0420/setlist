@@ -10,13 +10,6 @@
 
 ---
 
-> **Setlist is a fork** of [**sunnify-spotify-downloader**](https://github.com/sunnypatell/sunnify-spotify-downloader)
-> by [Sunny Patel](https://github.com/sunnypatell). It diverged to pursue a
-> power-user direction (a download queue, extended-mix mode, more output
-> controls) that's a different product vision from upstream. All of the original
-> engineering and copyright remain Sunny's — see [LICENSE](LICENSE). Big thanks
-> to the original project; this fork builds on top of it.
-
 Setlist takes a Spotify **playlist / album / track** URL, resolves each track on
 YouTube with `yt-dlp`, downloads the audio, and writes proper ID3 tags + cover
 art. It's a desktop app (PyQt5).
@@ -71,13 +64,18 @@ pyinstaller Setlist.spec     # produces dist/ for your platform
 python -m pytest -q
 ```
 
-## License & attribution
+## Fork, license & attribution
 
-Setlist is a fork and is distributed under the **same license** as the original
-project — see [LICENSE](LICENSE). Original copyright © 2024 Sunny Patel
-(Sunnify). This is a **student / educational portfolio project**: only use it
-with content you own or have permission to download, and in compliance with your
-local laws and the source services' terms. See [DISCLAIMER.md](DISCLAIMER.md).
+**Setlist is a fork** of [sunnify-spotify-downloader](https://github.com/sunnypatell/sunnify-spotify-downloader)
+by [Sunny Patel](https://github.com/sunnypatell), diverged to pursue a power-user
+direction (download queue, extended-mix mode, more output controls). The original
+engineering and copyright remain Sunny's, and it's distributed under the **same
+license** — see [LICENSE](LICENSE). Original copyright © 2024 Sunny Patel. Thanks
+to the original project; this fork builds on top of it.
+
+This is a **student / educational portfolio project**: only use it with content
+you own or have permission to download, and in compliance with your local laws
+and the source services' terms. See [DISCLAIMER.md](DISCLAIMER.md).
 
 To pull upstream bug-fixes into this fork:
 
