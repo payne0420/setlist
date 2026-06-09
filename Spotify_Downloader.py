@@ -1356,13 +1356,13 @@ class SettingsDialog(QDialog):
         header = QLabel("Settings")
         header.setObjectName("settingsHeader")
 
-        self._format_cb = QComboBox()
+        self._format_cb = theme.ThemedComboBox()
         for key in SUPPORTED_FORMATS:
             self._format_cb.addItem(key)
         self._format_cb.setCurrentText(self._config.get("format", "mp3"))
         self._format_cb.currentTextChanged.connect(self._on_format_change)
 
-        self._quality_cb = QComboBox()
+        self._quality_cb = theme.ThemedComboBox()
         for q in SUPPORTED_QUALITIES:
             self._quality_cb.addItem(f"{q} kbps")
         current_q = self._config.get("quality", "192")
@@ -1390,8 +1390,17 @@ class SettingsDialog(QDialog):
             "match. 0 = no limit. Applies to all downloads."
         )
 
-        self._artist_first_cb = QCheckBox("Name files as 'Artist - Track'")
-        self._artist_first_cb.setChecked(bool(self._config.get("artist_first", False)))
+        # Filename order as a dropdown (two naming formats) rather than a
+        # checkbox. Index 0 -> "Title - Artist" (artist_first=False, default),
+        # index 1 -> "Artist - Title" (artist_first=True). Mirrors the stems
+        # built in ScraperThread._format_track_filename.
+        self._filename_order_cb = theme.ThemedComboBox()
+        self._filename_order_cb.addItem("Title - Artist")
+        self._filename_order_cb.addItem("Artist - Title")
+        self._filename_order_cb.setCurrentIndex(
+            1 if bool(self._config.get("artist_first", False)) else 0
+        )
+        self._filename_order_cb.setToolTip("How downloaded files are named.")
 
         form = QFormLayout()
         form.addRow("Download folder:", folder_row)
@@ -1400,7 +1409,7 @@ class SettingsDialog(QDialog):
         form.addRow("Extended mix:", self._extended_mix_cb)
         form.addRow("Max extended-mix length (minutes):", self._max_extended_minutes_spin)
         form.addRow("Max file size:", self._max_track_mb_spin)
-        form.addRow("Filename order:", self._artist_first_cb)
+        form.addRow("Filename order:", self._filename_order_cb)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(self.accept)
@@ -1455,7 +1464,7 @@ class SettingsDialog(QDialog):
         self._config["extended_mix"] = self._extended_mix_cb.isChecked()
         self._config["max_extended_minutes"] = self._max_extended_minutes_spin.value()
         self._config["max_track_mb"] = self._max_track_mb_spin.value()
-        self._config["artist_first"] = self._artist_first_cb.isChecked()
+        self._config["artist_first"] = self._filename_order_cb.currentIndex() == 1
         return self._config
 
 

@@ -3,6 +3,7 @@
 import os
 import sys
 
+from PyQt5 import QtCore, QtWidgets
 from PyQt5.QtGui import QFontDatabase
 
 
@@ -448,3 +449,27 @@ def apply(app):
     font = QFontDatabase.systemFont(QFontDatabase.GeneralFont)
     font.setPointSize(10)
     app.setFont(font)
+
+
+class ThemedComboBox(QtWidgets.QComboBox):
+    """QComboBox whose drop-down popup has no white macOS window frame.
+
+    The popup is a separate top-level window, so the global stylesheet only
+    reaches the inner item-view — leaving the rounded dark list sitting on an
+    opaque white system window (the "white halo"/frame around the dropdown).
+    Making that popup window frameless + translucent lets only the styled view
+    show, with transparent corners instead of white.
+    """
+
+    def showPopup(self):
+        super().showPopup()
+        popup = self.view().window()
+        popup.setWindowFlags(
+            QtCore.Qt.Popup
+            | QtCore.Qt.FramelessWindowHint
+            | QtCore.Qt.NoDropShadowWindowHint
+        )
+        popup.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        popup.setAttribute(QtCore.Qt.WA_NoSystemBackground, True)
+        # setWindowFlags hides the window; re-show so the new flags take effect.
+        popup.show()
