@@ -1,6 +1,10 @@
 name: Build Release
 
 on:
+  # Auto-build whenever a GitHub Release is published (the normal path).
+  release:
+    types: [published]
+  # Manual path: re-run for an existing tag (e.g. to backfill assets) or for testing.
   workflow_dispatch:
     inputs:
       tag:
@@ -13,6 +17,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Resolve the target tag from whichever event fired:
+  #   workflow_dispatch -> inputs.tag
+  #   release published -> event.release.tag_name
+  #   fallback          -> github.ref_name
+  resolve-tag:
+    name: Resolve tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.r.outputs.tag }}
+    steps:
+      - id: r
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          if [ -z "$TAG" ]; then TAG="${{ github.event.release.tag_name }}"; fi
+          if [ -z "$TAG" ]; then TAG="${{ github.ref_name }}"; fi
+          if [ -z "$TAG" ]; then echo "::error::Could not resolve a release tag"; exit 1; fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Resolved release tag: $TAG"
+
   build-windows:
     name: Build Windows
     runs-on: windows-latest
@@ -125,17 +148,24 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Download FFmpeg
+      - name: Download FFmpeg (arm64 to match the macos-14 Apple Silicon runner)
         run: |
-          curl -L -o ffmpeg.zip https://evermeet.cx/ffmpeg/getrelease/zip
-          unzip ffmpeg.zip -d ffmpeg-temp
-          curl -L -o ffprobe.zip https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip
-          unzip ffprobe.zip -d ffmpeg-temp
+          # evermeet.cx ships x86_64-only ffmpeg; the macos-14 runner is arm64 and
+          # PyInstaller builds an arm64 app, so we need an arm64-native ffmpeg here.
+          # eugeneware/ffmpeg-static publishes per-arch static binaries (pinned tag).
+          FF_TAG="b6.1.1"
+          BASE="https://github.com/eugeneware/ffmpeg-static/releases/download/${FF_TAG}"
           mkdir -p ffmpeg
-          mv ffmpeg-temp/ffmpeg ffmpeg/
-          mv ffmpeg-temp/ffprobe ffmpeg/
+          curl -fL -o ffmpeg/ffmpeg  "${BASE}/ffmpeg-darwin-arm64"
+          curl -fL -o ffmpeg/ffprobe "${BASE}/ffprobe-darwin-arm64"
           chmod +x ffmpeg/ffmpeg ffmpeg/ffprobe
-          rm -rf ffmpeg-temp ffmpeg.zip ffprobe.zip
+          file ffmpeg/ffmpeg ffmpeg/ffprobe
+          # Fail fast if the bundled ffmpeg arch does not match the build arch.
+          HOST_ARCH="$(uname -m)"   # arm64 on macos-14
+          if ! file ffmpeg/ffmpeg | grep -q "arm64"; then
+            echo "::error::Bundled ffmpeg is not arm64 (build host is ${HOST_ARCH})"; exit 1
+          fi
+          ./ffmpeg/ffmpeg -version | head -1
           ls -la ffmpeg/
 
       - name: Install dependencies
@@ -145,6 +175,16 @@ jobs:
 
       - name: Build with PyInstaller
         run: pyinstaller Setlist.spec
+
+      - name: Verify FFmpeg is bundled in the app (correct arch + runs)
+        run: |
+          APP="dist/Setlist.app"
+          BUNDLED="$(find "$APP" -name ffmpeg -type f | head -1)"
+          echo "Bundled ffmpeg: ${BUNDLED:-<none>}"
+          test -n "$BUNDLED" || { echo "::error::ffmpeg was not bundled into Setlist.app"; exit 1; }
+          file "$BUNDLED"
+          file "$BUNDLED" | grep -q "arm64" || { echo "::error::Bundled ffmpeg has wrong arch"; exit 1; }
+          "$BUNDLED" -version | head -1
 
       - name: Create ZIP
         run: |
@@ -160,7 +200,7 @@ jobs:
   upload-release:
     name: Upload to Release
     runs-on: ubuntu-latest
-    needs: [build-windows, build-linux, build-macos]
+    needs: [resolve-tag, build-windows, build-linux, build-macos]
     permissions:
       contents: write
     steps:
@@ -175,7 +215,7 @@ jobs:
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag }}
+          tag_name: ${{ needs.resolve-tag.outputs.tag }}
           files: |
             artifacts/windows-build/Setlist-Windows.exe
             artifacts/linux-build/Setlist-Linux
@@ -184,7 +224,12 @@ jobs:
   update-homebrew:
     name: Update Homebrew Cask
     runs-on: ubuntu-latest
-    needs: [upload-release]
+    needs: [resolve-tag, upload-release]
+    # Don't rewrite the cask for prerelease/test tags (e.g. v2.1.0-rc1): skip if the
+    # release is marked prerelease, OR the tag carries a pre-release suffix (a hyphen).
+    # The hyphen check also covers manual workflow_dispatch runs, which have no release
+    # payload (so .prerelease is empty and the first clause alone would let them through).
+    if: ${{ github.event.release.prerelease != true && !contains(needs.resolve-tag.outputs.tag, '-') }}
     permissions:
       contents: write
     steps:
@@ -203,12 +248,12 @@ jobs:
           sleep 10
 
           # Get the SHA256 from the release asset digest
-          SHA256=$(gh api repos/${{ github.repository }}/releases/tags/${{ github.event.inputs.tag }} \
+          SHA256=$(gh api repos/${{ github.repository }}/releases/tags/${{ needs.resolve-tag.outputs.tag }} \
             --jq '.assets[] | select(.name == "Setlist-macOS.zip") | .digest' | sed 's/sha256://')
 
           if [ -z "$SHA256" ]; then
             echo "Failed to get SHA256, calculating manually..."
-            gh release download ${{ github.event.inputs.tag }} --pattern "Setlist-macOS.zip" --dir /tmp
+            gh release download ${{ needs.resolve-tag.outputs.tag }} --pattern "Setlist-macOS.zip" --dir /tmp
             SHA256=$(sha256sum /tmp/Setlist-macOS.zip | cut -d' ' -f1)
           fi
 
@@ -218,7 +263,7 @@ jobs:
       - name: Extract version from tag
         id: version
         run: |
-          VERSION="${{ github.event.inputs.tag }}"
+          VERSION="${{ needs.resolve-tag.outputs.tag }}"
           VERSION="${VERSION#v}"  # Remove 'v' prefix
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Version: $VERSION"
@@ -240,5 +285,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Casks/setlist.rb
-          git commit -m "chore(homebrew): auto-update cask to ${{ github.event.inputs.tag }}" || echo "No changes to commit"
+          git commit -m "chore(homebrew): auto-update cask to ${{ needs.resolve-tag.outputs.tag }}" || echo "No changes to commit"
           git push origin main
