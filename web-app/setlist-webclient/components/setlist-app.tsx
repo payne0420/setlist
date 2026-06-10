@@ -428,8 +428,7 @@ export default function SetlistApp() {
               <div className="mt-4 rounded-xl bg-black/40 p-3">
                 <p className="mb-1 text-xs font-semibold text-gray-500">Homebrew (macOS)</p>
                 <code className="block text-xs text-green-400">
-                  brew tap payne0420/setlist
-                  https://github.com/payne0420/setlist
+                  brew tap payne0420/setlist https://github.com/payne0420/setlist
                 </code>
                 <code className="block text-xs text-green-400">brew install --cask setlist</code>
               </div>
