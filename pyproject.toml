@@ -1,6 +1,6 @@
 [project]
 name = "setlist"
-version = "2.1.0"
+version = "2.2.0"
 description = "Setlist — Spotify→YouTube downloader (PyQt5) with a multi-playlist queue and extended-mix mode. A fork of Sunnify."
 readme = "README.md"
 requires-python = ">=3.9"

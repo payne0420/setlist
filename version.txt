@@ -1,6 +1,6 @@
-2.1.0
-FileVersion: 2,1,0,0
-ProductVersion: 2,1,0,0
+2.2.0
+FileVersion: 2,2,0,0
+ProductVersion: 2,2,0,0
 CompanyName: Sunny Jayendra Patel
 FileDescription: Setlist (Spotify Downloader) — a fork of Sunnify
 InternalName: Setlist

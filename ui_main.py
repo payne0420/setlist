@@ -297,7 +297,7 @@ class Ui_MainWindow:
         self.navQueue.setText(_t("MainWindow", "Queue"))
         self.navHistory.setText(_t("MainWindow", "History"))
         self.SettingsBtn.setText(_t("MainWindow", "Settings"))
-        self.version.setText(_t("MainWindow", "v2.1.0"))
+        self.version.setText(_t("MainWindow", "v2.2.0"))
         self.author.setText(_t("MainWindow", "A fork of Sunnify by Sunny Patel"))
 
         self.homeTitle.setText(_t("MainWindow", "Home"))

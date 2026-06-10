@@ -12,8 +12,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-06-11
+
+Two real lossless/high-bitrate download sources, a redesigned main window, and
+honest audio everywhere: a no-re-encode `original` format, a user-ordered
+fallback chain, per-source format offerings, and YouTube Premium cookie support.
+
 ### Added
 
+- **Real FLAC download source** — fetches genuine lossless audio from
+  Qobuz/Tidal/Amazon (Tidal via an optional self-hosted API instance), with
+  ISRC-exact matching, byte-level `fLaC` verification (a lossy stream is never
+  dressed up as FLAC), selectable quality tiers up to Hi-Res 24-bit, and
+  provider-accurate metadata/cover art.
+- **Spotify (librespot) download source** — opt-in capture of Spotify's own
+  ~320 kbps OGG Vorbis stream using your Premium account via librespot; the
+  native stream is written verbatim (no decode/re-encode) with full Vorbis
+  tags and embedded cover art.
+- **YouTube Premium cookies** — optionally point Setlist at a cookies.txt from
+  a Premium-logged-in browser to unlock YouTube's higher-bitrate audio
+  (~256 kbps Opus/AAC, formats 774/141) for YouTube downloads.
+- **Main-window redesign** — persistent sidebar navigation (Home, Queue,
+  History, Settings as in-window panes), a live track list while downloading,
+  aligned input/button sizing, and an empty-state for the queue.
 - **Original (no re-encode) audio format** — YouTube downloads can keep the
   source codec (`.opus`, `.m4a`, etc.) instead of transcoding; fallback-chain
   YouTube steps use the same passthrough path. `.opus` files are now tagged.
@@ -255,7 +276,8 @@ Sunnify 2.0.7.
 - Node 20+ for webclient
 - FFmpeg + yt-dlp for audio processing
 
-[Unreleased]: https://github.com/payne0420/setlist/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/payne0420/setlist/compare/v2.2.0...HEAD
+[2.2.0]: https://github.com/payne0420/setlist/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/payne0420/setlist/releases/tag/v2.1.0
 [2.0.7]: https://github.com/sunnypatell/sunnify-spotify-downloader/compare/v2.0.6...v2.0.7
 [2.0.6]: https://github.com/sunnypatell/sunnify-spotify-downloader/compare/v2.0.5...v2.0.6
