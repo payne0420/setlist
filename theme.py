@@ -22,6 +22,8 @@ def _asset_url(name: str) -> str:
 
 _CHEVRON_DOWN = _asset_url("chevron-down.svg")
 _CHEVRON_UP = _asset_url("chevron-up.svg")
+_CHEVRON_DOWN_DISABLED = _asset_url("chevron-down-disabled.svg")
+_CHEVRON_UP_DISABLED = _asset_url("chevron-up-disabled.svg")
 _CHECK = _asset_url("check.svg")
 
 COLORS = {
@@ -39,6 +41,12 @@ COLORS = {
     "accent_pressed": "#169C46",
     "download_text": "#000000",
     "progress_track": "#3E3E3E",
+    # Disabled inputs: hardcoded dark-theme colors suppress the platform's
+    # default greying, so without explicit :disabled rules a greyed-out
+    # control is indistinguishable from a live one.
+    "disabled_bg": "#1F1F1F",
+    "disabled_border": "#2E2E2E",
+    "text_disabled": "#55555A",
 }
 
 STYLESHEET = f"""
@@ -60,6 +68,10 @@ QLabel {{
     background: transparent;
     color: {COLORS["text_primary"]};
     border: none;
+}}
+
+QLabel:disabled {{
+    color: {COLORS["text_disabled"]};
 }}
 
 QLabel#title {{
@@ -126,6 +138,12 @@ QLineEdit#PlaylistLink:read-only {{
 
 QLineEdit#PlaylistLink:read-only:focus {{
     border: 1px solid {COLORS["input_border"]};
+}}
+
+QLineEdit#PlaylistLink:disabled {{
+    background-color: {COLORS["disabled_bg"]};
+    border: 1px solid {COLORS["disabled_border"]};
+    color: {COLORS["text_disabled"]};
 }}
 
 /* Multi-playlist queue dialog: paste box + queue list */
@@ -459,6 +477,10 @@ QCheckBox {{
     font-size: 13px;
 }}
 
+QCheckBox:disabled {{
+    color: {COLORS["text_disabled"]};
+}}
+
 QCheckBox::indicator {{
     width: 18px;
     height: 18px;
@@ -478,6 +500,15 @@ QCheckBox::indicator:checked {{
     background-color: {COLORS["accent"]};
     border: 2px solid {COLORS["accent"]};
     image: url({_CHECK});
+}}
+
+QCheckBox::indicator:unchecked:disabled {{
+    border: 2px solid {COLORS["disabled_border"]};
+}}
+
+QCheckBox::indicator:checked:disabled {{
+    background-color: {COLORS["disabled_border"]};
+    border: 2px solid {COLORS["disabled_border"]};
 }}
 
 QProgressBar#SongDownloadprogress, QProgressBar#SongDownloadprogressBar {{
@@ -508,6 +539,12 @@ QComboBox:focus, QComboBox:on {{
     border: 1px solid {COLORS["focus"]};
 }}
 
+QComboBox:disabled {{
+    background-color: {COLORS["disabled_bg"]};
+    border: 1px solid {COLORS["disabled_border"]};
+    color: {COLORS["text_disabled"]};
+}}
+
 QComboBox::drop-down {{
     subcontrol-origin: padding;
     subcontrol-position: top right;
@@ -522,6 +559,10 @@ QComboBox::down-arrow {{
     width: 12px;
     height: 8px;
     margin-right: 10px;
+}}
+
+QComboBox::down-arrow:disabled {{
+    image: url({_CHEVRON_DOWN_DISABLED});
 }}
 
 QComboBox QAbstractItemView {{
@@ -549,6 +590,12 @@ QSpinBox:focus {{
     border: 1px solid {COLORS["focus"]};
 }}
 
+QSpinBox:disabled {{
+    background-color: {COLORS["disabled_bg"]};
+    border: 1px solid {COLORS["disabled_border"]};
+    color: {COLORS["text_disabled"]};
+}}
+
 QSpinBox::up-button, QSpinBox::down-button {{
     subcontrol-origin: border;
     width: 22px;
@@ -571,6 +618,11 @@ QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
     background-color: {COLORS["input_border"]};
 }}
 
+QSpinBox::up-button:disabled, QSpinBox::down-button:disabled {{
+    background-color: {COLORS["disabled_bg"]};
+    border-left: 1px solid {COLORS["disabled_border"]};
+}}
+
 QSpinBox::up-arrow {{
     image: url({_CHEVRON_UP});
     width: 11px;
@@ -581,6 +633,14 @@ QSpinBox::down-arrow {{
     image: url({_CHEVRON_DOWN});
     width: 11px;
     height: 7px;
+}}
+
+QSpinBox::up-arrow:disabled {{
+    image: url({_CHEVRON_UP_DISABLED});
+}}
+
+QSpinBox::down-arrow:disabled {{
+    image: url({_CHEVRON_DOWN_DISABLED});
 }}
 
 QDialog {{

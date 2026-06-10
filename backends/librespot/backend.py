@@ -256,6 +256,13 @@ class LibrespotBackend:
         if not self._allow_fallback:
             raise error_if_no_fallback or OggCaptureError(reason)
         self.used_youtube_fallback = True  # reliable signal for the seam / History
+        # This source's format is pinned to its native "ogg"; honoring that here
+        # would force a pointless extra lossy generation (YouTube's stream ->
+        # Vorbis) that also breaks on ffmpeg builds without libvorbis. Mirror
+        # the Real FLAC fallback instead: deliver MP3 320k, labelled as such.
+        if audio_format not in ("mp3", "m4a", "opus"):
+            audio_format, audio_quality = "mp3", "320"
+            reason += " (MP3 320k)"
         self._emit(reason)
         if self._youtube is None:
             self._youtube = YouTubeBackend(self._scraper)

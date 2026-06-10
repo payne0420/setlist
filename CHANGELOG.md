@@ -12,6 +12,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The **Audio format** setting now only offers formats the selected download
+  source can honestly deliver. YouTube lists its lossy targets (`mp3`/`m4a`/
+  `opus`/`ogg`) — `flac`/`wav` are gone there, since transcoding YouTube's
+  lossy stream into a lossless container only inflated the file without adding
+  quality. The Real FLAC source pins the format to its native `flac` and the
+  Spotify (librespot) source to its native `ogg`; switching source updates the
+  dropdown and falls back to that source's default when the previous choice is
+  no longer offered. Persisted configs are reconciled the same way on load.
+- The **Lossless quality** tier selector moved from the LOSSLESS card into the
+  OUTPUT card next to the other format/quality settings; it is greyed out
+  unless the Real FLAC source is selected. The bitrate selector is likewise
+  greyed out for sources that ignore it (Real FLAC and Spotify/librespot).
+- A Spotify (librespot) track that falls back to YouTube now downloads as
+  MP3 320k — labelled as such in the status line — instead of re-encoding
+  YouTube's lossy stream to Ogg Vorbis (a pointless extra lossy generation
+  that also failed on ffmpeg builds without `libvorbis`), mirroring the Real
+  FLAC fallback behavior.
+
 ### Fixed
 
 - Settings page rendered with overlapping, squeezed rows when opened in a
@@ -19,6 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   window was manually resized. The panel now lives in a scroll area, and wheel
   input over a combo box / spin box scrolls the page instead of silently
   changing the setting under the cursor.
+- Disabled settings controls looked identical to enabled ones — the dark
+  theme's hardcoded colors suppressed Qt's default greying, so an inactive
+  combo box (e.g. Lossless quality with the YouTube source selected) still
+  looked clickable. The theme now styles the `:disabled` state of combo boxes,
+  spin boxes, checkboxes and text fields (dimmed text, background, border and
+  chevrons), and the row labels of source-dependent settings grey out together
+  with their fields.
 
 ## [2.1.0] - 2026-06-09
 

@@ -148,6 +148,20 @@ SUPPORTED_FORMATS = {
 }
 SUPPORTED_QUALITIES = ("128", "192", "256", "320")
 
+# Formats offered per download source (first entry = default when switching).
+# YouTube only serves lossy streams, so the lossless containers (flac/wav) are
+# not offered there: transcoding lossy audio into FLAC/WAV inflates the file
+# without adding quality (fake lossless). The lossless and librespot backends
+# ignore the format setting on their native paths (always .flac / .ogg), so
+# their dropdowns pin to that single honest value; both backends remap their
+# YouTube fallbacks to MP3 320k, labelled as such. flac/wav stay in
+# SUPPORTED_FORMATS only for download_audio's transcode machinery.
+SOURCE_FORMATS = {
+    "youtube": ("mp3", "m4a", "opus", "ogg"),
+    "lossless": ("flac",),
+    "librespot": ("ogg",),
+}
+
 # Resume manifest: a JSON-lines file dropped inside each playlist/album folder
 # recording which tracks already downloaded. On a re-run we skip those tracks
 # before fetching their metadata, so a huge playlist throttled by Spotify's
@@ -246,6 +260,12 @@ def load_config() -> dict:
         defaults["max_track_mb"] = mb  # 0 = no file-size limit
         if defaults["download_source"] not in KNOWN_DOWNLOAD_SOURCES:
             defaults["download_source"] = DEFAULT_DOWNLOAD_SOURCE
+        # The format must be one the chosen source actually offers (e.g. a
+        # pre-existing "flac" + YouTube config would otherwise produce
+        # fake-lossless files; lossless/librespot pin their native format).
+        _allowed = SOURCE_FORMATS[defaults["download_source"]]
+        if defaults["format"] not in _allowed:
+            defaults["format"] = _allowed[0]
         # Lossless: quality must be a known Qobuz/Tidal tier; tidal URL must be
         # https:// — or plain http:// on a loopback host for a self-hosted
         # instance — or empty (normalize_tidal_api_url, shared with the
@@ -321,9 +341,15 @@ class MusicScraper(QThread):
         self.spotifydown_api = None
         self._cancel_event = cancel_event or threading.Event()
         self._failed_tracks: list[str] = []  # Track failed downloads
-        # Output options. audio_format must be a key of SUPPORTED_FORMATS;
+        # Output options. audio_format must be one the chosen source offers
+        # (SOURCE_FORMATS) — e.g. flac + YouTube would yield fake-lossless files;
         # audio_quality only applies to lossy formats (mp3/m4a/opus).
-        self.audio_format = audio_format if audio_format in SUPPORTED_FORMATS else "mp3"
+        _allowed_formats = SOURCE_FORMATS.get(
+            download_source, SOURCE_FORMATS[DEFAULT_DOWNLOAD_SOURCE]
+        )
+        self.audio_format = (
+            audio_format if audio_format in _allowed_formats else _allowed_formats[0]
+        )
         self.audio_quality = audio_quality if audio_quality in SUPPORTED_QUALITIES else "192"
         self.extended_mix = extended_mix
         # When set, an extended candidate must also match the source track's
@@ -1736,10 +1762,13 @@ class SettingsPanel(QWidget):
         self._source_cb.setFixedHeight(40)
         self._source_cb.currentIndexChanged.connect(self._on_source_change)
 
+        # Only the formats the selected source actually delivers (SOURCE_FORMATS);
+        # repopulated by _sync_format_choices when the source changes.
         self._format_cb = theme.ThemedComboBox()
-        for key in SUPPORTED_FORMATS:
+        for key in SOURCE_FORMATS.get(_cur_source, SOURCE_FORMATS[DEFAULT_DOWNLOAD_SOURCE]):
             self._format_cb.addItem(key)
         self._format_cb.setCurrentText(cfg.get("format", "mp3"))
+        self._format_cb.setEnabled(self._format_cb.count() > 1)
         self._format_cb.setFixedHeight(40)
         self._format_cb.currentTextChanged.connect(self._on_format_change)
         self._format_cb.currentTextChanged.connect(lambda t: self._save("format", t))
@@ -1750,6 +1779,26 @@ class SettingsPanel(QWidget):
         self._quality_cb.setCurrentText(f"{cfg.get('quality', '192')} kbps")
         self._quality_cb.setFixedHeight(40)
         self._quality_cb.currentTextChanged.connect(lambda t: self._save("quality", t.split()[0]))
+
+        # Quality tier preference for the Real FLAC backend (greyed out unless
+        # that source is selected — _sync_lossless_enabled). Labels are friendly;
+        # stored values are the SpotiFLAC codes "27"|"7"|"6".
+        self._lossless_quality_options = [
+            ("Hi-Res 24-bit (≤192 kHz)", "27"),
+            ("24-bit (≤96 kHz)", "7"),
+            ("16-bit / 44.1 kHz", "6"),
+        ]
+        self._lossless_quality_cb = theme.ThemedComboBox()
+        for label, _val in self._lossless_quality_options:
+            self._lossless_quality_cb.addItem(label)
+        _cur_q = str(cfg.get("lossless_quality", "27"))
+        self._lossless_quality_cb.setCurrentIndex(
+            next((i for i, (_, v) in enumerate(self._lossless_quality_options) if v == _cur_q), 0)
+        )
+        self._lossless_quality_cb.setFixedHeight(40)
+        self._lossless_quality_cb.currentIndexChanged.connect(
+            lambda i: self._save("lossless_quality", self._lossless_quality_options[i][1])
+        )
 
         self._filename_order_cb = theme.ThemedComboBox()
         self._filename_order_cb.addItem("Title - Artist")
@@ -1763,8 +1812,18 @@ class SettingsPanel(QWidget):
         out_card, out_form = self._card()
         out_form.addRow("Download folder", folder_row)
         out_form.addRow("Download source", self._field(self._source_cb, 210))
-        out_form.addRow("Audio format", self._field(self._format_cb, 210))
-        out_form.addRow("Audio quality", self._field(self._quality_cb, 210))
+        # Keep the labels of source-dependent rows so the sync helpers can grey
+        # them out together with their controls (a disabled field with a bright
+        # label still reads as editable).
+        _format_row = self._field(self._format_cb, 210)
+        out_form.addRow("Audio format", _format_row)
+        self._format_lbl = out_form.labelForField(_format_row)
+        _quality_row = self._field(self._quality_cb, 210)
+        out_form.addRow("Audio quality", _quality_row)
+        self._quality_lbl = out_form.labelForField(_quality_row)
+        _lossless_q_row = self._field(self._lossless_quality_cb, 210)
+        out_form.addRow("Lossless quality", _lossless_q_row)
+        self._lossless_quality_lbl = out_form.labelForField(_lossless_q_row)
         out_form.addRow("Filename order", self._field(self._filename_order_cb, 210))
 
         # ---- Matching card ----
@@ -1810,31 +1869,12 @@ class SettingsPanel(QWidget):
         match_card, match_form = self._card()
         match_form.addRow(self._extended_mix_cb)  # span full width, left-aligned
         match_form.addRow(self._extended_strict_cb)  # sub-option of extended mode
-        match_form.addRow(
-            "Max extended-mix length", self._field(self._max_extended_minutes_spin, 150)
-        )
+        _max_ext_row = self._field(self._max_extended_minutes_spin, 150)
+        match_form.addRow("Max extended-mix length", _max_ext_row)
+        self._max_extended_lbl = match_form.labelForField(_max_ext_row)
         match_form.addRow("Max file size", self._field(self._max_track_mb_spin, 150))
 
         # ---- Lossless card ----
-        # Quality tier preference for the Real FLAC backend. Labels are friendly;
-        # stored values are the SpotiFLAC codes "27"|"7"|"6".
-        self._lossless_quality_options = [
-            ("Hi-Res 24-bit (≤192 kHz)", "27"),
-            ("24-bit (≤96 kHz)", "7"),
-            ("16-bit / 44.1 kHz", "6"),
-        ]
-        self._lossless_quality_cb = theme.ThemedComboBox()
-        for label, _val in self._lossless_quality_options:
-            self._lossless_quality_cb.addItem(label)
-        _cur_q = str(cfg.get("lossless_quality", "27"))
-        self._lossless_quality_cb.setCurrentIndex(
-            next((i for i, (_, v) in enumerate(self._lossless_quality_options) if v == _cur_q), 0)
-        )
-        self._lossless_quality_cb.setFixedHeight(40)
-        self._lossless_quality_cb.currentIndexChanged.connect(
-            lambda i: self._save("lossless_quality", self._lossless_quality_options[i][1])
-        )
-
         self._tidal_api_field = QLineEdit(cfg.get("tidal_api_url", ""))
         self._tidal_api_field.setObjectName("PlaylistLink")
         self._tidal_api_field.setPlaceholderText(
@@ -1873,8 +1913,8 @@ class SettingsPanel(QWidget):
         disclaimer.setObjectName("queueEmptyHint")
 
         lossless_card, lossless_form = self._card()
-        lossless_form.addRow("Quality", self._field(self._lossless_quality_cb, 210))
         lossless_form.addRow("Tidal API instance", self._tidal_api_field)
+        self._tidal_api_lbl = lossless_form.labelForField(self._tidal_api_field)
         lossless_form.addRow(self._lossless_fallback_cb)
         lossless_form.addRow(disclaimer)
 
@@ -1891,8 +1931,10 @@ class SettingsPanel(QWidget):
         body.addWidget(self._spotify_card)
         body.addStretch(1)
 
-        # Apply initial dependent-state (lossless disables bitrate, etc.)
-        self._on_format_change(self._format_cb.currentText())
+        # Apply initial dependent-state (non-YouTube sources disable bitrate,
+        # pinned formats grey out, etc.). _sync_format_choices is idempotent
+        # here: it rebuilds the same items and triggers no save.
+        self._sync_format_choices()
         self._sync_extended_enabled(self._extended_mix_cb.isChecked())
         self._sync_lossless_enabled()
         self._refresh_spotify_status()
@@ -1938,14 +1980,17 @@ class SettingsPanel(QWidget):
 
     def _sync_extended_enabled(self, on):
         self._max_extended_minutes_spin.setEnabled(bool(on))
+        self._max_extended_lbl.setEnabled(bool(on))
         self._extended_strict_cb.setEnabled(bool(on))
 
     def _sync_lossless_enabled(self, *_):
-        """Grey out the LOSSLESS controls unless the Real FLAC source is selected
-        (mirrors _sync_extended_enabled)."""
+        """Grey out the lossless controls unless the Real FLAC source is selected
+        (mirrors _sync_extended_enabled). Row labels grey out with their fields."""
         on = self._source_options[self._source_cb.currentIndex()][1] == "lossless"
         self._lossless_quality_cb.setEnabled(on)
+        self._lossless_quality_lbl.setEnabled(on)
         self._tidal_api_field.setEnabled(on)
+        self._tidal_api_lbl.setEnabled(on)
         self._lossless_fallback_cb.setEnabled(on)
 
     def _save_tidal_api(self):
@@ -1956,10 +2001,41 @@ class SettingsPanel(QWidget):
             self._tidal_api_field.setText(value)
         self._save("tidal_api_url", value)
 
-    def _on_format_change(self, fmt):
-        """Lossless formats (flac/wav) ignore the bitrate selector."""
+    def _on_format_change(self, _fmt):
+        self._sync_quality_enabled()
+
+    def _sync_quality_enabled(self):
+        """Bitrate applies only to the YouTube transcode path with a lossy
+        format. The lossless (.flac) and librespot (~320k .ogg) sources ignore
+        it: their native streams are fixed-quality and their YouTube fallbacks
+        are pinned to MP3 320k."""
+        fmt = self._format_cb.currentText()
         is_lossy = SUPPORTED_FORMATS.get(fmt, {}).get("lossy", True)
-        self._quality_cb.setEnabled(is_lossy)
+        on = self._current_source() == "youtube" and is_lossy
+        self._quality_cb.setEnabled(on)
+        self._quality_lbl.setEnabled(on)
+
+    def _sync_format_choices(self):
+        """Rebuild the format dropdown for the current source, keeping the
+        user's choice when the new source still offers it, else the source's
+        default (first SOURCE_FORMATS entry)."""
+        allowed = SOURCE_FORMATS.get(
+            self._current_source(), SOURCE_FORMATS[DEFAULT_DOWNLOAD_SOURCE]
+        )
+        current = self._format_cb.currentText()
+        chosen = current if current in allowed else allowed[0]
+        self._format_cb.blockSignals(True)
+        self._format_cb.clear()
+        for key in allowed:
+            self._format_cb.addItem(key)
+        self._format_cb.setCurrentText(chosen)
+        self._format_cb.blockSignals(False)
+        # A pinned single-format source (lossless/librespot) is not a choice.
+        self._format_cb.setEnabled(len(allowed) > 1)
+        self._format_lbl.setEnabled(len(allowed) > 1)
+        if chosen != current:
+            self._save("format", chosen)
+        self._sync_quality_enabled()
 
     # ---- Spotify account (librespot backend) ----------------------------
 
@@ -2083,6 +2159,7 @@ class SettingsPanel(QWidget):
             self._save("librespot_consented", True)
         self._source_index = index
         self._save("download_source", source)
+        self._sync_format_choices()
         self._sync_lossless_enabled()
         self._sync_spotify_card_enabled()
 

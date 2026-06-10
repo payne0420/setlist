@@ -577,6 +577,34 @@ class TestBackendFetch:
         assert ext == "mp3"  # YouTube fallback, not native ogg
         assert calls.get("fetched")
 
+    def test_fallback_remaps_ogg_to_mp3_320(self, tmp_path, monkeypatch):
+        # The UI pins this source's format to its native "ogg"; the YouTube
+        # fallback must not transcode YouTube's lossy stream to Vorbis (an
+        # extra lossy generation, and ffmpeg builds without libvorbis fail).
+        # It mirrors the Real FLAC fallback: MP3 320k.
+        be = self._backend(monkeypatch, product="free")
+        calls = {}
+
+        class FakeYouTube:
+            def __init__(self, scraper):
+                pass
+
+            def fetch(self, **kw):
+                calls["fetched"] = kw
+                return ("/tmp/fallback.mp3", "mp3", kw["extended"])
+
+        monkeypatch.setattr("backends.librespot.backend.YouTubeBackend", FakeYouTube)
+        be.fetch(
+            track=_track(),
+            destination=str(tmp_path / "s.mp3"),
+            extended=False,
+            audio_format="ogg",
+            audio_quality="192",
+            cancel=_no_cancel,
+        )
+        assert calls["fetched"]["audio_format"] == "mp3"
+        assert calls["fetched"]["audio_quality"] == "320"
+
     def test_extended_streams_searched_id(self, tmp_path, monkeypatch):
         be = self._backend(monkeypatch, product="premium")
         monkeypatch.setattr(search, "find_extended_id", lambda *_a, **_k: "EXTENDED_ID")

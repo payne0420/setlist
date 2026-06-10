@@ -304,7 +304,7 @@ class TestDownloadTrackAudioOpts:
         """Per-call audio_format/audio_quality override scraper instance attrs."""
         from Spotify_Downloader import MusicScraper
 
-        scraper = MusicScraper(audio_format="flac", audio_quality="192")
+        scraper = MusicScraper(audio_format="opus", audio_quality="192")
         url = "https://www.youtube.com/watch?v=abc"
         with (
             patch("Spotify_Downloader.get_ffmpeg_path", return_value="/usr/bin"),
@@ -325,7 +325,17 @@ class TestDownloadTrackAudioOpts:
 
             mock_ydl.reset_mock()
             with contextlib.suppress(Exception):
-                scraper.download_track_audio("test query", "/tmp/test.flac")
+                scraper.download_track_audio("test query", "/tmp/test.opus")
+            download_opts = mock_ydl.call_args[0][0]
+            pp = download_opts["postprocessors"][0]
+            assert pp["preferredcodec"] == "opus"
+            assert pp["preferredquality"] == "192"
+
+            # Lossless transcode stays available to the per-call seam (no
+            # bitrate arg) even though no source offers flac for YouTube.
+            mock_ydl.reset_mock()
+            with contextlib.suppress(Exception):
+                scraper.download_track_audio("test query", "/tmp/test.flac", audio_format="flac")
             download_opts = mock_ydl.call_args[0][0]
             pp = download_opts["postprocessors"][0]
             assert pp["preferredcodec"] == "flac"

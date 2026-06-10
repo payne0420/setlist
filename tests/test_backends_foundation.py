@@ -236,3 +236,47 @@ class TestConfigDownloadSource:
         cfg.write_text(json.dumps({"download_source": "bogus"}))
         monkeypatch.setattr(sd, "_config_path", lambda: str(cfg))
         assert sd.load_config()["download_source"] == "youtube"
+
+
+class TestSourceFormats:
+    """Per-source format policy: every source only offers what it can honestly
+    deliver (no fake-lossless from YouTube; lossless/librespot pin their native
+    container)."""
+
+    def _load(self, tmp_path, monkeypatch, data):
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps(data))
+        monkeypatch.setattr(sd, "_config_path", lambda: str(cfg))
+        return sd.load_config()
+
+    def test_youtube_offers_only_lossy_formats(self):
+        for fmt in sd.SOURCE_FORMATS["youtube"]:
+            assert sd.SUPPORTED_FORMATS[fmt]["lossy"]
+
+    def test_config_flac_plus_youtube_resets_to_mp3(self, tmp_path, monkeypatch):
+        loaded = self._load(tmp_path, monkeypatch, {"format": "flac"})
+        assert loaded["format"] == "mp3"
+
+    def test_config_lossless_source_pins_flac(self, tmp_path, monkeypatch):
+        loaded = self._load(tmp_path, monkeypatch, {"download_source": "lossless", "format": "mp3"})
+        assert loaded["format"] == "flac"
+
+    def test_config_librespot_source_pins_ogg(self, tmp_path, monkeypatch):
+        loaded = self._load(
+            tmp_path, monkeypatch, {"download_source": "librespot", "format": "mp3"}
+        )
+        assert loaded["format"] == "ogg"
+
+    def test_scraper_coerces_format_to_source(self):
+        # flac + YouTube would transcode a lossy stream into a lossless
+        # container; the scraper falls back to the source's default instead.
+        assert sd.MusicScraper(audio_format="flac").audio_format == "mp3"
+        assert (
+            sd.MusicScraper(download_source="lossless", audio_format="mp3").audio_format == "flac"
+        )
+        assert (
+            sd.MusicScraper(download_source="librespot", audio_format="mp3").audio_format == "ogg"
+        )
+
+    def test_scraper_keeps_format_the_source_offers(self):
+        assert sd.MusicScraper(audio_format="m4a").audio_format == "m4a"
