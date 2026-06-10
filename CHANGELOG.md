@@ -12,6 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Settings page rendered with overlapping, squeezed rows when opened in a
+  window shorter than its content (the default 900×580 launch size) until the
+  window was manually resized. The panel now lives in a scroll area, and wheel
+  input over a combo box / spin box scrolls the page instead of silently
+  changing the setting under the cursor.
+
 ## [2.1.0] - 2026-06-09
 
 First Setlist release — the fork's accumulated work since diverging from

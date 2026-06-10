@@ -44,6 +44,7 @@ from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -56,6 +57,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QStackedWidget,
     QVBoxLayout,
@@ -1896,6 +1898,15 @@ class SettingsPanel(QWidget):
         self._refresh_spotify_status()
         self._sync_spotify_card_enabled()
 
+        # The panel lives in a scroll area, so a wheel tick over a combo/spin
+        # must scroll the page — not silently edit the setting under the cursor
+        # (an accidental tick could flip the download source). Refusing the
+        # event here makes Qt propagate it up to the scroll viewport; arrows,
+        # typing and the dropdown stay usable for deliberate edits.
+        for w in self.findChildren(QComboBox) + self.findChildren(QSpinBox):
+            w.setFocusPolicy(Qt.StrongFocus)
+            w.wheelEvent = lambda e: e.ignore()
+
     def _card(self):
         card = QFrame()
         card.setObjectName("card")
@@ -2420,9 +2431,18 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.queuePageLayout.addWidget(self.queue_dialog, 1)
 
         # Settings is also an embedded page (no modal dialog). It reads + writes
-        # self._config and persists each change immediately.
+        # self._config and persists each change immediately. The panel is taller
+        # than the default window, so it lives in a scroll area — without one the
+        # form rows get squeezed below their fixed heights and paint on top of
+        # each other until a resize gives the layout enough room.
         self.settings_panel = SettingsPanel(self)
-        self.settingsPageLayout.addWidget(self.settings_panel, 1)
+        self._settings_scroll = QScrollArea()
+        self._settings_scroll.setObjectName("settingsScroll")
+        self._settings_scroll.setWidget(self.settings_panel)
+        self._settings_scroll.setWidgetResizable(True)
+        self._settings_scroll.setFrameShape(QFrame.NoFrame)
+        self._settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.settingsPageLayout.addWidget(self._settings_scroll, 1)
 
         # The Home "Add to Download Queue" button jumps to the Queue page.
         self.QueueBtn.clicked.connect(self.open_queue_dialog)

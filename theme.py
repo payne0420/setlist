@@ -394,6 +394,14 @@ QLabel#queueEmptyHint {{
     color: {COLORS["text_tertiary"]};
 }}
 
+/* Settings scroll area: viewport must stay transparent so the page's dark
+   background shows through (scroll viewports auto-fill with the palette
+   otherwise). */
+QScrollArea#settingsScroll,
+QScrollArea#settingsScroll > QWidget > QWidget {{
+    background: transparent;
+}}
+
 /* Dark, minimal scrollbars (were native/unstyled before) */
 QScrollBar:vertical {{
     background: transparent;
