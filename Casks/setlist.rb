@@ -5,7 +5,7 @@
 
 cask "setlist" do
   version "2.2.0"
-  sha256 "616a00f776b4e3a3ea7ffac3a6db60f48a03be3f4371eba0873dc2a973eefe20"
+  sha256 "6570078a6dd566beaa1e081a3d5ce3b594b86a0c14ecba6a5ef9558c63a77ad9"
 
   url "https://github.com/payne0420/setlist/releases/download/v#{version}/Setlist-macOS.zip"
   name "Setlist"
