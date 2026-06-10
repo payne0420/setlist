@@ -40,10 +40,16 @@ class YouTubeBackend:
                 expected_duration_s=expected_dur,
                 fallback_query=normal_query,
                 source_title=track_title,
+                audio_format=audio_format,
+                audio_quality=audio_quality,
             )
         else:
             path, used = s.download_track_audio(
-                normal_query, destination, expected_duration_s=expected_dur
+                normal_query,
+                destination,
+                expected_duration_s=expected_dur,
+                audio_format=audio_format,
+                audio_quality=audio_quality,
             )
         ext = os.path.splitext(path)[1].lstrip(".")
         return path, ext, used

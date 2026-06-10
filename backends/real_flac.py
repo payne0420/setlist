@@ -5,7 +5,8 @@ the Spotify ISRC, then tries each lossless service in order (Qobuz → Amazon, w
 Tidal prepended when the user configured an instance); the first that yields a
 **validated, genuinely-lossless** ``.flac`` wins. If every lossless service
 fails, it falls through to the YouTube backend so the track still downloads —
-labelled honestly as non-lossless (goal §3, §9, §13).
+labelled honestly as non-lossless, and lossless containers (``flac``/``wav``)
+are remapped to MP3 320k so the file matches its lossy source (goal §3, §9, §13).
 
 Honesty is enforced at the byte level: a file is only kept as ``.flac`` when its
 bytes actually start with the ``fLaC`` magic. We never transcode a lossy stream
@@ -89,6 +90,12 @@ class RealFlacBackend:
         # When every lossless service fails: fall back to YouTube (a non-lossless
         # file) if True, else fail the track so only genuine lossless ever lands.
         self._youtube_fallback = bool(getattr(scraper, "lossless_youtube_fallback", True))
+        self._yt_fallback_flag = threading.local()
+
+    @property
+    def used_youtube_fallback(self) -> bool:
+        """True when the LAST fetch on THIS thread was served by YouTube fallback."""
+        return bool(getattr(self._yt_fallback_flag, "value", False))
 
     # -- helpers ------------------------------------------------------------ #
     @staticmethod
@@ -147,6 +154,7 @@ class RealFlacBackend:
 
     # -- fetch -------------------------------------------------------------- #
     def fetch(self, *, track, destination, extended, audio_format, audio_quality, cancel):
+        self._yt_fallback_flag.value = False
         expected_s = self._expected_seconds(track)
 
         # Resolve ISRC once (cached on the track + on disk). Best-effort: a missing
@@ -192,16 +200,23 @@ class RealFlacBackend:
         # Mark the source degraded so the seam knows album/track-number metadata
         # is unavailable from a provider (it still enriches from Spotify spclient).
         self._record_provider_meta(track.id, "youtube", None)
+        yt_format, yt_quality = audio_format, audio_quality
+        if audio_format in ("flac", "wav"):
+            yt_format, yt_quality = "mp3", "320"
+        self._yt_fallback_flag.value = True
         with contextlib.suppress(Exception):
-            self._scraper.error_signal.emit(
-                "Lossless source unavailable — fell back to YouTube (not lossless)"
+            msg = (
+                "Lossless source unavailable — fell back to YouTube (MP3 320k, not lossless)"
+                if audio_format in ("flac", "wav")
+                else "Lossless source unavailable — fell back to YouTube (not lossless)"
             )
+            self._scraper.error_signal.emit(msg)
         return self._youtube.fetch(
             track=track,
             destination=destination,
             extended=extended,
-            audio_format=audio_format,
-            audio_quality=audio_quality,
+            audio_format=yt_format,
+            audio_quality=yt_quality,
             cancel=cancel,
         )
 

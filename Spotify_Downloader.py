@@ -631,12 +631,17 @@ class MusicScraper(QThread):
         expected_duration_s=None,
         fallback_query=None,
         source_title=None,
+        audio_format=None,
+        audio_quality=None,
     ):
         """Download audio from YouTube to *destination*.
 
         Returns ``(path, used_extended)`` where *used_extended* is True when the
         strict extended-mix search leg produced the file, False when a normal /
         fallback query did.
+
+        *audio_format* and *audio_quality* override the scraper's instance
+        attributes for this call (used by backend delegations).
         """
         # Check for FFmpeg first
         ffmpeg_path = get_ffmpeg_path()
@@ -646,7 +651,8 @@ class MusicScraper(QThread):
                 "or apt install ffmpeg (Linux)"
             )
 
-        fmt = self.audio_format if self.audio_format in SUPPORTED_FORMATS else "mp3"
+        requested = audio_format if audio_format is not None else self.audio_format
+        fmt = requested if requested in SUPPORTED_FORMATS else "mp3"
         ext = SUPPORTED_FORMATS[fmt]["ext"]
         is_lossy = SUPPORTED_FORMATS[fmt]["lossy"]
 
@@ -657,7 +663,9 @@ class MusicScraper(QThread):
             "preferredcodec": SUPPORTED_FORMATS[fmt].get("codec", fmt),
         }
         if is_lossy:
-            postprocessor["preferredquality"] = self.audio_quality
+            postprocessor["preferredquality"] = (
+                audio_quality if audio_quality is not None else self.audio_quality
+            )
 
         ydl_opts = {
             "format": "bestaudio/best",

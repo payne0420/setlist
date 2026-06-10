@@ -96,6 +96,46 @@ class TestYouTubeBackendFetch:
         assert path == "/tmp/song.flac"
         assert ext == "flac"  # derived from the real file, not the destination
 
+    def test_fetch_forwards_audio_format_and_quality_normal(self):
+        s = MusicScraper(audio_format="flac")
+        seen = {}
+
+        def fake(query, dest, **kw):
+            seen.update(kw=kw)
+            return dest, False
+
+        s.download_track_audio = fake
+        s._backend.fetch(
+            track=_track(),
+            destination="/tmp/song.mp3",
+            extended=False,
+            audio_format="mp3",
+            audio_quality="320",
+            cancel=s.is_cancelled,
+        )
+        assert seen["kw"]["audio_format"] == "mp3"
+        assert seen["kw"]["audio_quality"] == "320"
+
+    def test_fetch_forwards_audio_format_and_quality_extended(self):
+        s = MusicScraper(extended_mix=True, audio_format="flac")
+        seen = {}
+
+        def fake(query, dest, **kw):
+            seen.update(kw=kw)
+            return dest, True
+
+        s.download_track_audio = fake
+        s._backend.fetch(
+            track=_track(title="Song (Radio Edit)"),
+            destination="/tmp/song.mp3",
+            extended=True,
+            audio_format="mp3",
+            audio_quality="320",
+            cancel=s.is_cancelled,
+        )
+        assert seen["kw"]["audio_format"] == "mp3"
+        assert seen["kw"]["audio_quality"] == "320"
+
 
 class TestSelectorParity:
     """track_selectors must reproduce the old _select_youtube_match decisions."""

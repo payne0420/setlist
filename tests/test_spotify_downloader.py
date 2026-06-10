@@ -300,6 +300,37 @@ class TestDownloadTrackAudioOpts:
             opts = mock_ydl.call_args[0][0]
             assert opts["concurrent_fragment_downloads"] == 4
 
+    def test_per_call_audio_format_quality_override(self):
+        """Per-call audio_format/audio_quality override scraper instance attrs."""
+        from Spotify_Downloader import MusicScraper
+
+        scraper = MusicScraper(audio_format="flac", audio_quality="192")
+        url = "https://www.youtube.com/watch?v=abc"
+        with (
+            patch("Spotify_Downloader.get_ffmpeg_path", return_value="/usr/bin"),
+            patch.object(scraper, "_select_youtube_match", return_value=url),
+            patch("Spotify_Downloader.YoutubeDL") as mock_ydl,
+            patch("os.path.exists", return_value=True),
+        ):
+            mock_ydl.return_value.__enter__ = MagicMock(return_value=mock_ydl)
+            mock_ydl.return_value.__exit__ = MagicMock(return_value=False)
+            with contextlib.suppress(Exception):
+                scraper.download_track_audio(
+                    "test query", "/tmp/test.mp3", audio_format="mp3", audio_quality="320"
+                )
+            download_opts = mock_ydl.call_args[0][0]
+            pp = download_opts["postprocessors"][0]
+            assert pp["preferredcodec"] == "mp3"
+            assert pp["preferredquality"] == "320"
+
+            mock_ydl.reset_mock()
+            with contextlib.suppress(Exception):
+                scraper.download_track_audio("test query", "/tmp/test.flac")
+            download_opts = mock_ydl.call_args[0][0]
+            pp = download_opts["postprocessors"][0]
+            assert pp["preferredcodec"] == "flac"
+            assert "preferredquality" not in pp
+
 
 class TestYoutubeMatchSelection:
     """Tests for duration-aware YouTube match selection.
