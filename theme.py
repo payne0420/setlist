@@ -309,23 +309,6 @@ QPushButton[nav="true"]:disabled {{
     color: {COLORS["text_tertiary"]};
 }}
 
-QPushButton#Select_Home {{
-    background-color: transparent;
-    color: {COLORS["text_secondary"]};
-    border: none;
-    font-size: 12px;
-    text-align: left;
-    padding: 4px 0;
-}}
-
-QPushButton#Select_Home:hover {{
-    color: {COLORS["accent_hover"]};
-}}
-
-QPushButton#Select_Home:pressed {{
-    color: {COLORS["accent"]};
-}}
-
 /* ---- Redesign: sidebar shell, content pages, cards, lists ---- */
 QStackedWidget#content {{
     background-color: {COLORS["base"]};

@@ -44,6 +44,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   extended-mix soft misses to YouTube by default: migrated configs get
   `fallback_order: ["youtube"]`, and the chain decides extended-mix semantics.
 
+### Removed
+
+- The **Follow on LinkedIn** sidebar button (inherited from upstream Sunnify).
+  The "A fork of Sunnify by Sunny Patel" attribution label stays.
+
 ### Fixed
 
 - Settings page rendered with overlapping, squeezed rows when opened in a

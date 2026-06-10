@@ -2937,8 +2937,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self.showPreviewCheck.stateChanged.connect(self.show_preview)
         self.show_preview(self.showPreviewCheck.checkState())  # apply initial state
 
-        self.Select_Home.clicked.connect(self.Linkedin)
-
         # Sidebar navigation switches the content stack. Drive it off `toggled`
         # rather than `clicked`: the buttons are checkable and exclusive, and
         # `toggled` fires for every activation path — mouse, keyboard (Space),
@@ -3491,9 +3489,6 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         on = int(state) == int(Qt.Checked)
         self.previewBox.setVisible(on)
         self.MainSongName.setVisible(not on)
-
-    def Linkedin(self):
-        webbrowser.open("https://www.linkedin.com/in/sunny-patel-30b460204/")
 
 
 # Main

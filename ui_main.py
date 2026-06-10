@@ -9,7 +9,7 @@ Every widget attribute name the download engine in ``Spotify_Downloader.py``
 references is preserved (PlaylistLink, DownloadBtn, QueueBtn, SettingsBtn,
 AlbumName, MainSongName, PlaylistMsg_2, showPreviewCheck, AddMetaDataCheck,
 CounterLabel, statusMsg, SongDownloadprogress, CoverImg, SongName, YearText,
-ArtistNameText, AlbumText, label_8, Select_Home, version, author), so the
+ArtistNameText, AlbumText, label_8, version, author), so the
 existing signal/slot wiring keeps working on top of the new layout.
 """
 
@@ -96,11 +96,6 @@ class Ui_MainWindow:
         self.author.setObjectName("author")
         self.author.setWordWrap(True)
         side.addWidget(self.author)
-        self.Select_Home = QtWidgets.QPushButton(self.sidebar)
-        self.Select_Home.setObjectName("Select_Home")
-        self.Select_Home.setFlat(True)
-        self.Select_Home.setCursor(QtGui.QCursor(_POINTING))
-        side.addWidget(self.Select_Home)
 
     def _build_home_page(self):
         self.homePage = QtWidgets.QWidget()
@@ -304,7 +299,6 @@ class Ui_MainWindow:
         self.SettingsBtn.setText(_t("MainWindow", "Settings"))
         self.version.setText(_t("MainWindow", "v2.1.0"))
         self.author.setText(_t("MainWindow", "A fork of Sunnify by Sunny Patel"))
-        self.Select_Home.setText(_t("MainWindow", "Follow on LinkedIn ↗"))
 
         self.homeTitle.setText(_t("MainWindow", "Home"))
         self.PlaylistLink.setPlaceholderText(
