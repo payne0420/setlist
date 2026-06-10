@@ -388,9 +388,7 @@ class TestOriginalPassthrough:
             mock_ydl.return_value.__enter__ = MagicMock(return_value=mock_ydl)
             mock_ydl.return_value.__exit__ = MagicMock(return_value=False)
             mock_ydl.extract_info = MagicMock(return_value=info)
-            path, _ = scraper.download_track_audio(
-                "q", dest_base + ".mp3", audio_format="original"
-            )
+            path, _ = scraper.download_track_audio("q", dest_base + ".mp3", audio_format="original")
         assert path == str(opus_path)
 
     def test_final_path_glob_when_info_none(self, tmp_path):
@@ -413,9 +411,7 @@ class TestOriginalPassthrough:
             mock_ydl.return_value.__enter__ = MagicMock(return_value=mock_ydl)
             mock_ydl.return_value.__exit__ = MagicMock(return_value=False)
             mock_ydl.extract_info = MagicMock(side_effect=write_opus)
-            path, _ = scraper.download_track_audio(
-                "q", dest_base + ".mp3", audio_format="original"
-            )
+            path, _ = scraper.download_track_audio("q", dest_base + ".mp3", audio_format="original")
         assert path == str(opus_path)
 
     def test_stale_file_with_failed_attempt_raises(self, tmp_path):
@@ -495,9 +491,7 @@ class TestOriginalPassthrough:
                 return_value={"requested_downloads": [{"filepath": str(opus_path)}]}
             )
             try:
-                scraper.download_track_audio(
-                    "q", dest_base + ".mp3", audio_format="original"
-                )
+                scraper.download_track_audio("q", dest_base + ".mp3", audio_format="original")
             except RuntimeError as exc:
                 raised = str(exc)
         assert raised is not None and "size limit" in raised

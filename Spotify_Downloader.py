@@ -974,10 +974,7 @@ class MusicScraper(QThread):
                     # Enforce the optional max file-size cap on the FINAL file. A
                     # too-large file is the wrong-version signal (e.g. an hour-long
                     # mix), so discard it and try the next candidate/fallback.
-                    if (
-                        self.max_track_bytes
-                        and os.path.getsize(final_path) > self.max_track_bytes
-                    ):
+                    if self.max_track_bytes and os.path.getsize(final_path) > self.max_track_bytes:
                         too_big = True
                         with contextlib.suppress(OSError):
                             os.remove(final_path)
