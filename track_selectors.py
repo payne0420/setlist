@@ -14,6 +14,7 @@ Qobuz/Tidal track id, a Spotify track id). The selectors only ever look at
 from __future__ import annotations
 
 import re
+import unicodedata
 
 # Max gap (seconds) between the Spotify track length and a candidate's length
 # for the candidate to count as the "same" recording. In extended mode it is the
@@ -32,6 +33,21 @@ EXTENDED_MAX_RATIO = 2.5
 
 # Default for the user-configurable max_extended_minutes.
 DEFAULT_MAX_EXTENDED_MINUTES = 20
+
+# Minimum fraction of the source track's title tokens that must appear in a
+# candidate's title for it to count as the SAME song in strict-match mode. The
+# guard rejects "longer + has 'extended'" uploads that are actually a different
+# track's extended cut (e.g. a "Teardrop" search grabbing a "Maybe Not" remix).
+EXTENDED_TITLE_MATCH_MIN_RATIO = 0.6
+
+# Version/qualifier words stripped before comparing two titles, so a candidate
+# like "More (Zerb Extended Remix)" still matches the source "More - Zerb Remix".
+_TITLE_QUALIFIER_RE = re.compile(
+    r"\b(?:extended|remix|edit|mix|version|radio|club|original|"
+    r"remaster(?:ed)?|feat|ft|with|vip|bootleg|rework|dub|instrumental|"
+    r"mono|stereo|live|acoustic)\b",
+    re.IGNORECASE,
+)
 
 RADIO_EDIT_RE = re.compile(
     r"\s*(?:\(\s*radio\s*edit\s*\)|\[\s*radio\s*edit\s*\]|[-–—]\s*radio\s*edit\b)\s*",
@@ -55,7 +71,30 @@ def title_boost(title: str) -> bool:
     return any(kw in t for kw in EXTENDED_TITLE_KEYWORDS)
 
 
-def select_extended(cands, expected_s, max_track_duration_s):
+def _title_tokens(title: str) -> set[str]:
+    """Accent-folded, qualifier-stripped significant word set for *title*."""
+    t = unicodedata.normalize("NFKD", title or "").encode("ascii", "ignore").decode("ascii")
+    t = _TITLE_QUALIFIER_RE.sub(" ", t.lower())
+    t = re.sub(r"[^a-z0-9]+", " ", t)
+    return {w for w in t.split() if len(w) >= 2}
+
+
+def title_matches(source_title: str, candidate_title: str) -> bool:
+    """True iff *candidate_title* plausibly refers to the same track as
+    *source_title*. Compares qualifier-stripped, accent-folded token sets and
+    requires at least ``EXTENDED_TITLE_MATCH_MIN_RATIO`` of the source's tokens
+    to appear in the candidate. An empty source title accepts (no basis to
+    reject)."""
+    src = _title_tokens(source_title)
+    if not src:
+        return True
+    cand = _title_tokens(candidate_title)
+    return len(src & cand) / len(src) >= EXTENDED_TITLE_MATCH_MIN_RATIO
+
+
+def select_extended(
+    cands, expected_s, max_track_duration_s, *, source_title=None, strict_title=False
+):
     """Pick the extended cut among *cands* (or None to fall back).
 
     Mirrors MusicScraper._select_youtube_match's prefer_extended branch:
@@ -65,8 +104,15 @@ def select_extended(cands, expected_s, max_track_duration_s):
          and pick the keyworded candidate CLOSEST to expected.
       3. No expected duration: require keyword + sane length, take the first
          (most relevant) such candidate.
+
+    When *strict_title* is set and *source_title* is given, candidates whose
+    title does not plausibly match *source_title* (:func:`title_matches`) are
+    discarded FIRST — so a longer "extended" upload of a *different* song can
+    never win; the search falls back to the original instead.
     Returns the chosen candidate's ``id`` or ``None``.
     """
+    if strict_title and source_title:
+        cands = [c for c in cands if title_matches(source_title, c.get("title") or "")]
     timed = [c for c in cands if c.get("duration_s")]
     if expected_s:
         lower = expected_s + DURATION_TOLERANCE_S

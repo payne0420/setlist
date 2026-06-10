@@ -77,6 +77,7 @@ from download_queue import (
     classify_completion,
     parse_playlist_urls,
 )
+from lossless._util import normalize_tidal_api_url
 from spotifydown_api import (
     ExtractionError,
     NetworkError,
@@ -175,9 +176,25 @@ def load_config() -> dict:
         "quality": "192",
         "extended_mix": False,
         "max_extended_minutes": 20,
+        # Require a YouTube/catalog candidate's title to match the source track
+        # before it can win as the extended cut (avoids grabbing a different
+        # song's extended mix). Only consulted when extended_mix is on.
+        "extended_strict_match": True,
         "max_track_mb": 0,
         "artist_first": False,
         "download_source": DEFAULT_DOWNLOAD_SOURCE,
+        # Lossless (Real FLAC) backend settings (goal §11). Inert unless
+        # download_source == "lossless".
+        "tidal_api_url": "",
+        "lossless_quality": "27",
+        "lossless_service_order": "qobuz,amazon",
+        # When no lossless service can serve a track, fall back to YouTube (a
+        # non-lossless file). Off = skip/fail the track instead (pure-lossless).
+        "lossless_youtube_fallback": True,
+        # Which source wins for album/track-number/cover tags on Real-FLAC files:
+        # "provider" (default) = the release the FLAC bytes came from; "spotify" =
+        # the exact album of the user's Spotify track. See _enrich_song_meta.
+        "flac_metadata_source": "provider",
     }
     try:
         with open(_config_path(), encoding="utf-8") as f:
@@ -196,6 +213,7 @@ def load_config() -> dict:
         except (TypeError, ValueError):
             mem = 20
         defaults["max_extended_minutes"] = mem
+        defaults["extended_strict_match"] = bool(defaults.get("extended_strict_match", True))
         try:
             mb = int(defaults["max_track_mb"])
             if mb < 0:
@@ -205,6 +223,22 @@ def load_config() -> dict:
         defaults["max_track_mb"] = mb  # 0 = no file-size limit
         if defaults["download_source"] not in KNOWN_DOWNLOAD_SOURCES:
             defaults["download_source"] = DEFAULT_DOWNLOAD_SOURCE
+        # Lossless: quality must be a known Qobuz/Tidal tier; tidal URL must be
+        # https:// — or plain http:// on a loopback host for a self-hosted
+        # instance — or empty (normalize_tidal_api_url, shared with the
+        # backend and the settings panel).
+        if str(defaults.get("lossless_quality")) not in ("27", "7", "6"):
+            defaults["lossless_quality"] = "27"
+        defaults["tidal_api_url"] = normalize_tidal_api_url(
+            str(defaults.get("tidal_api_url") or "")
+        )
+        if not isinstance(defaults.get("lossless_service_order"), str):
+            defaults["lossless_service_order"] = "qobuz,amazon"
+        defaults["lossless_youtube_fallback"] = bool(
+            defaults.get("lossless_youtube_fallback", True)
+        )
+        if defaults.get("flac_metadata_source") not in ("provider", "spotify"):
+            defaults["flac_metadata_source"] = "provider"
         return defaults
     except (OSError, json.JSONDecodeError):
         return defaults
@@ -244,9 +278,15 @@ class MusicScraper(QThread):
         audio_quality: str = "192",
         extended_mix: bool = False,
         max_extended_minutes: int = 20,
+        extended_strict_match: bool = True,
         max_track_mb: int = 0,
         artist_first: bool = False,
         download_source: str = DEFAULT_DOWNLOAD_SOURCE,
+        tidal_api_url: str = "",
+        lossless_quality: str = "27",
+        lossless_service_order: str = "qobuz,amazon",
+        lossless_youtube_fallback: bool = True,
+        flac_metadata_source: str = "provider",
     ):
         super().__init__()
         self.counter = 0  # Initialize counter to zero
@@ -259,6 +299,10 @@ class MusicScraper(QThread):
         self.audio_format = audio_format if audio_format in SUPPORTED_FORMATS else "mp3"
         self.audio_quality = audio_quality if audio_quality in SUPPORTED_QUALITIES else "192"
         self.extended_mix = extended_mix
+        # When set, an extended candidate must also match the source track's
+        # title before it can win (guards against grabbing a different song's
+        # extended cut). Inert unless extended_mix is on. See select_extended.
+        self.extended_strict_match = bool(extended_strict_match)
         try:
             mem = int(max_extended_minutes)
         except (TypeError, ValueError):
@@ -282,6 +326,20 @@ class MusicScraper(QThread):
         # that only makes sense for a single active download.
         self._parallel_mode = False
         self._total_tracks = 0
+        # Lossless (Real FLAC) backend config. Set BEFORE make_backend so the
+        # RealFlacBackend can read them at construction (goal §11). Inert for the
+        # YouTube path.
+        self.tidal_api_url = tidal_api_url
+        self.lossless_quality = lossless_quality
+        self.lossless_service_order = lossless_service_order
+        self.lossless_youtube_fallback = bool(lossless_youtube_fallback)
+        # Which source wins for the album-coupled tags (album, track/disc number,
+        # cover, release date): "provider" = the release the FLAC bytes came from
+        # (default; honors "from the lossless provider directly"), "spotify" = the
+        # exact album of the user's Spotify track. See _enrich_song_meta.
+        self.flac_metadata_source = (
+            flac_metadata_source if flac_metadata_source in ("provider", "spotify") else "provider"
+        )
         # Pluggable audio source (YouTube by default). The fetch seam in
         # _download_one_track / scrape_track routes through this.
         self.download_source = download_source
@@ -302,6 +360,18 @@ class MusicScraper(QThread):
         if "HTTP Error 429" in str(error):
             return "YouTube rate limit - waiting..."
         error_text = str(error).lower()
+        # Lossless backend failures (goal §2). Matched on message text so the
+        # YouTube path never imports the lossless package.
+        if "no lossless source found" in error_text:
+            return f"No lossless source for '{track_title}' — skipped (YouTube fallback off)"
+        if "isrc" in error_text:
+            return f"Couldn't find an ISRC for '{track_title}' - no lossless lookup"
+        if "not genuine flac" in error_text or "lossy" in error_text:
+            return f"'{track_title}' had no lossless source - trying YouTube"
+        if "region" in error_text:
+            return f"'{track_title}' is region-locked on the lossless service"
+        if "qobuz" in error_text or "tidal" in error_text or "amazon" in error_text:
+            return "Lossless resolver unavailable - falling back"
         if (
             "no video formats" in error_text
             or "no playable audio source" in error_text
@@ -424,7 +494,9 @@ class MusicScraper(QThread):
         """
         return f"ytsearch10:{track_title} {artists} extended"
 
-    def _select_youtube_match(self, search_query, expected_duration_s, prefer_extended=False):
+    def _select_youtube_match(
+        self, search_query, expected_duration_s, prefer_extended=False, source_title=None
+    ):
         """Return the best YouTube watch URL for a search, or None.
 
         Flat-searches the query (fast, metadata only). The top hit is trusted
@@ -463,7 +535,11 @@ class MusicScraper(QThread):
         ]
         if prefer_extended:
             chosen_id = track_selectors.select_extended(
-                cands, expected_duration_s, self.max_track_duration_s
+                cands,
+                expected_duration_s,
+                self.max_track_duration_s,
+                source_title=source_title,
+                strict_title=self.extended_strict_match,
             )
         else:
             chosen_id = track_selectors.select_normal(cands, expected_duration_s)
@@ -488,7 +564,12 @@ class MusicScraper(QThread):
         return plan
 
     def download_track_audio(
-        self, search_query, destination, expected_duration_s=None, fallback_query=None
+        self,
+        search_query,
+        destination,
+        expected_duration_s=None,
+        fallback_query=None,
+        source_title=None,
     ):
         """Download audio from YouTube to *destination*.
 
@@ -540,7 +621,9 @@ class MusicScraper(QThread):
         # instead of silently reporting a path that does not exist.
         too_big = False
         for query, pe in self._build_youtube_download_plan(search_query, fallback_query):
-            video_url = self._select_youtube_match(query, expected_duration_s, prefer_extended=pe)
+            video_url = self._select_youtube_match(
+                query, expected_duration_s, prefer_extended=pe, source_title=source_title
+            )
             if not video_url:
                 continue
             try:
@@ -620,6 +703,91 @@ class MusicScraper(QThread):
                     progress = int(downloaded / total * 100)
                     self.dlprogress_signal.emit(progress)
         return destination
+
+    def _enrich_song_meta(self, song_meta: dict, track_id: str = "") -> None:
+        """Enrich ``song_meta`` with rich, accurate tags for a Real-FLAC download.
+
+        The seam builds ``song_meta`` from the spotifydown embed, which has **no
+        album / no album track-or-disc number** (its ``trackNumber`` is the 1-based
+        PLAYLIST position) and joins artists with a non-breaking space. This fills
+        those in from one of two rich sources, choosing a SINGLE self-consistent
+        set (never mixing album from one release with the track number from
+        another — they may be different releases resolved by ISRC):
+
+        * **provider** that served the FLAC (Qobuz/Tidal/Amazon), captured during
+          ``fetch`` — tags the file from the SAME release its bytes came from;
+        * **Spotify spclient** metadata (the exact album of the user's Spotify
+          track), via the backend's :class:`SpotifyIsrcResolver` (already used for
+          the ISRC, so usually no extra request).
+
+        ``flac_metadata_source`` (``"provider"`` default | ``"spotify"``) decides
+        which wins; the other is the fallback, and the embed is the floor. Always
+        best-effort: a metadata miss leaves the embed data (with artists' nbsp
+        cleaned). Title is owned by the seam (extended-mix marker / _meta_title)."""
+        # Universal floor: strip the non-breaking space the embed leaks in, so even
+        # a track with no rich source still gets a clean artist tag.
+        artists = song_meta.get("artists")
+        if isinstance(artists, str) and "\xa0" in artists:
+            song_meta["artists"] = artists.replace("\xa0", " ")
+
+        backend = getattr(self, "_backend", None)
+        provider_getter = getattr(backend, "provider_metadata_for", None)
+        # Rich enrichment is a Real-FLAC concern: only the lossless backend exposes
+        # a provider store + an ISRC resolver. The YouTube path keeps the cleaned
+        # embed (and never imports the lossless package).
+        if not callable(provider_getter) or not track_id:
+            return
+
+        provider_meta = (provider_getter(track_id) or {}).get("meta") or {}
+        resolver = getattr(backend, "_isrc", None)
+
+        # Resolve sources lazily in priority order: with provider-first and a
+        # complete provider album, we never touch the Spotify spclient path
+        # (avoids a needless token/metadata request when the ISRC didn't cache it).
+        _spotify_cache: list = []
+
+        def _spotify() -> dict:
+            if not _spotify_cache:
+                m = {}
+                if resolver is not None and hasattr(resolver, "resolve_metadata"):
+                    m = resolver.resolve_metadata(track_id) or {}
+                _spotify_cache.append(m)
+            return _spotify_cache[0]
+
+        pref = getattr(self, "flac_metadata_source", "provider")
+        order = ("spotify", "provider") if pref == "spotify" else ("provider", "spotify")
+
+        def _source(name: str) -> dict:
+            return provider_meta if name == "provider" else _spotify()
+
+        # Pick ONE self-consistent set: the first preferred source carrying an
+        # album (the defining field of a release).
+        winner = next((s for s in (_source(n) for n in order) if s.get("album")), None)
+        if winner is None:
+            # No album from any rich source — keep the embed (playlist position and
+            # all), but still upgrade to a source's clean artists if one has them.
+            for name in order:
+                if _source(name).get("artists"):
+                    song_meta["artists"] = _source(name)["artists"]
+                    break
+            return
+
+        # Apply the winning release as ONE set. trackNumber / discNumber / date come
+        # from the winner ALONE — clearing any stale embed value (e.g. the playlist
+        # position) so we never mix a real album with the wrong track number.
+        song_meta["album"] = winner["album"]
+        song_meta["trackNumber"] = winner.get("trackNumber") or 0
+        song_meta["discNumber"] = winner.get("discNumber") or 0
+        song_meta["releaseDate"] = winner.get("releaseDate", "")
+        if winner.get("albumArtist"):
+            song_meta["albumArtist"] = winner["albumArtist"]
+        if winner.get("artists"):
+            song_meta["artists"] = winner["artists"]
+        # Cover: prefer the winning release's art; keep the track's embed cover only
+        # if the winner has none (some art beats none — the writer won't clear a good
+        # embedded cover unless it has a replacement to embed).
+        if winner.get("cover"):
+            song_meta["cover"] = winner["cover"]
 
     def _download_one_track(self, track, playlist_folder_path, default_cover_url, track_num=0):
         """Download a single track. Runs inside a ThreadPoolExecutor worker.
@@ -714,6 +882,7 @@ class MusicScraper(QThread):
         try:
             if os.path.exists(filepath):
                 self._record_in_manifest(track.id, filepath)
+                self._enrich_song_meta(song_meta, track.id)
                 self.add_song_meta.emit(song_meta)
                 self._finish_track_ui(ok=True)
                 return None
@@ -756,6 +925,7 @@ class MusicScraper(QThread):
             self._record_in_manifest(track.id, final_path)
             song_meta["title"] = meta_title
             song_meta["file"] = final_path
+            self._enrich_song_meta(song_meta, track.id)
             self.add_song_meta.emit(song_meta)
             self._finish_track_ui(ok=True)
             return None
@@ -908,7 +1078,9 @@ class MusicScraper(QThread):
         # Clamp to what the active backend can safely run in parallel (e.g. a
         # single-session backend declares max_concurrency = 1). YouTube = 4, so
         # this is a no-op for the default source.
-        worker_count = min(worker_count, getattr(self._backend, "max_concurrency", self.MAX_WORKERS))
+        worker_count = min(
+            worker_count, getattr(self._backend, "max_concurrency", self.MAX_WORKERS)
+        )
         self._parallel_mode = worker_count > 1
 
         if worker_count == 1:
@@ -1020,6 +1192,7 @@ class MusicScraper(QThread):
         self.song_meta.emit(dict(song_meta))
 
         if os.path.exists(filepath):
+            self._enrich_song_meta(song_meta, track.id)
             self.add_song_meta.emit(song_meta)
             self.increment_counter()
             self.PlaylistCompleted.emit("Track already exists!")
@@ -1057,6 +1230,7 @@ class MusicScraper(QThread):
         )
         song_meta["title"] = meta_title
         song_meta["file"] = final_path
+        self._enrich_song_meta(song_meta, track.id)
         self.add_song_meta.emit(song_meta)
         self.increment_counter()
         self.dlprogress_signal.emit(100)
@@ -1089,9 +1263,15 @@ class ScraperThread(QThread):
         audio_quality: str = "192",
         extended_mix: bool = False,
         max_extended_minutes: int = 20,
+        extended_strict_match: bool = True,
         max_track_mb: int = 0,
         artist_first: bool = False,
         download_source: str = DEFAULT_DOWNLOAD_SOURCE,
+        tidal_api_url: str = "",
+        lossless_quality: str = "27",
+        lossless_service_order: str = "qobuz,amazon",
+        lossless_youtube_fallback: bool = True,
+        flac_metadata_source: str = "provider",
     ):
         super().__init__()
         self.spotify_link = spotify_link
@@ -1104,9 +1284,15 @@ class ScraperThread(QThread):
             audio_quality=audio_quality,
             extended_mix=extended_mix,
             max_extended_minutes=max_extended_minutes,
+            extended_strict_match=extended_strict_match,
             max_track_mb=max_track_mb,
             artist_first=artist_first,
             download_source=download_source,
+            tidal_api_url=tidal_api_url,
+            lossless_quality=lossless_quality,
+            lossless_service_order=lossless_service_order,
+            lossless_youtube_fallback=lossless_youtube_fallback,
+            flac_metadata_source=flac_metadata_source,
         )
         # Capture the terminal status string synchronously IN the worker thread.
         # PlaylistCompleted is emitted from run()'s thread; a DirectConnection
@@ -1159,11 +1345,18 @@ def _write_metadata_mp3(filename: str, tags: dict, cover_bytes: bytes | None) ->
     audio = EasyID3(filename)
     audio["title"] = tags.get("title", "")
     audio["artist"] = tags.get("artists", "")
-    audio["album"] = tags.get("album", "")
+    album = tags.get("album", "")
+    if album:
+        # Skip an empty album so a re-tag (where the rich-metadata source was
+        # unavailable) never erases an album written on the first download.
+        audio["album"] = album
     audio["date"] = tags.get("releaseDate", "")
     track_num = tags.get("trackNumber") or 0
     if track_num:
         audio["tracknumber"] = str(track_num)
+    disc_num = tags.get("discNumber") or 0
+    if disc_num:
+        audio["discnumber"] = str(disc_num)
     audio.save()
     if cover_bytes:
         id3 = ID3(filename)
@@ -1178,13 +1371,18 @@ def _write_metadata_m4a(filename: str, tags: dict, cover_bytes: bytes | None) ->
     audio = MP4(filename)
     audio["\xa9nam"] = tags.get("title", "")
     audio["\xa9ART"] = tags.get("artists", "")
-    audio["\xa9alb"] = tags.get("album", "")
+    album = tags.get("album", "")
+    if album:  # don't erase an existing album on a re-tag (see _write_metadata_mp3)
+        audio["\xa9alb"] = album
     date = tags.get("releaseDate", "")
     if date:
         audio["\xa9day"] = date
     track_num = tags.get("trackNumber") or 0
     if track_num:
         audio["trkn"] = [(int(track_num), 0)]
+    disc_num = tags.get("discNumber") or 0
+    if disc_num:
+        audio["disk"] = [(int(disc_num), 0)]
     if cover_bytes:
         audio["covr"] = [MP4Cover(cover_bytes, imageformat=MP4Cover.FORMAT_JPEG)]
     audio.save()
@@ -1195,16 +1393,37 @@ def _write_metadata_flac(filename: str, tags: dict, cover_bytes: bytes | None) -
     from mutagen.flac import FLAC, Picture
 
     audio = FLAC(filename)
+    # Strip MP4-container junk the provider→FLAC ffmpeg remux (Tidal/Amazon DASH
+    # path) leaks into the Vorbis comments; we re-set the real tags below. These
+    # ftyp atoms are never legitimate FLAC tags.
+    for junk in ("major_brand", "minor_version", "compatible_brands"):
+        audio.pop(junk, None)
+    # `encoder` CAN be a legitimate FLAC tag, so only drop the ffmpeg remux marker.
+    if any("lavf" in v.lower() for v in audio.get("encoder", [])):
+        audio.pop("encoder", None)
     audio["title"] = tags.get("title", "")
     audio["artist"] = tags.get("artists", "")
-    audio["album"] = tags.get("album", "")
+    album = tags.get("album", "")
+    if album:
+        # Skip an empty album so a re-tag (where the rich-metadata source was
+        # unavailable) never erases an album written on the first download. This
+        # also stops the original clobber: the embed has no album, so writing ""
+        # used to wipe the album the provider FLAC arrived with.
+        audio["album"] = album
+    album_artist = tags.get("albumArtist", "")
+    if album_artist:
+        audio["albumartist"] = album_artist
     date = tags.get("releaseDate", "")
     if date:
         audio["date"] = date
     track_num = tags.get("trackNumber") or 0
     if track_num:
         audio["tracknumber"] = str(track_num)
+    disc_num = tags.get("discNumber") or 0
+    if disc_num:
+        audio["discnumber"] = str(disc_num)
     if cover_bytes:
+        audio.clear_pictures()  # avoid stacking a 2nd cover on a re-tag
         pic = Picture()
         pic.type = 3  # Front cover
         pic.mime = "image/jpeg"
@@ -1317,7 +1536,10 @@ class SettingsPanel(QWidget):
 
         # Download source. Each entry is (display label, config value). Follow-on
         # backends append their own ("lossless", "librespot") here.
-        self._source_options = [("YouTube", "youtube")]
+        self._source_options = [
+            ("YouTube", "youtube"),
+            ("Real FLAC (Qobuz/Tidal/Amazon)", "lossless"),
+        ]
         self._source_cb = theme.ThemedComboBox()
         for label, _val in self._source_options:
             self._source_cb.addItem(label)
@@ -1329,6 +1551,7 @@ class SettingsPanel(QWidget):
         self._source_cb.currentIndexChanged.connect(
             lambda i: self._save("download_source", self._source_options[i][1])
         )
+        self._source_cb.currentIndexChanged.connect(self._sync_lossless_enabled)
 
         self._format_cb = theme.ThemedComboBox()
         for key in SUPPORTED_FORMATS:
@@ -1367,6 +1590,15 @@ class SettingsPanel(QWidget):
         self._extended_mix_cb.toggled.connect(lambda on: self._save("extended_mix", on))
         self._extended_mix_cb.toggled.connect(self._sync_extended_enabled)
 
+        self._extended_strict_cb = QCheckBox("Strict title match (skip wrong-song extended cuts)")
+        self._extended_strict_cb.setChecked(bool(cfg.get("extended_strict_match", True)))
+        self._extended_strict_cb.setToolTip(
+            "Only accept an extended cut whose title matches this track. When the "
+            "real extended version isn't found, download the original instead of "
+            "grabbing a different song's extended mix."
+        )
+        self._extended_strict_cb.toggled.connect(lambda on: self._save("extended_strict_match", on))
+
         self._max_extended_minutes_spin = QSpinBox()
         self._max_extended_minutes_spin.setRange(1, 180)
         self._max_extended_minutes_spin.setValue(int(cfg.get("max_extended_minutes", 20)))
@@ -1394,20 +1626,87 @@ class SettingsPanel(QWidget):
 
         match_card, match_form = self._card()
         match_form.addRow(self._extended_mix_cb)  # span full width, left-aligned
+        match_form.addRow(self._extended_strict_cb)  # sub-option of extended mode
         match_form.addRow(
             "Max extended-mix length", self._field(self._max_extended_minutes_spin, 150)
         )
         match_form.addRow("Max file size", self._field(self._max_track_mb_spin, 150))
 
+        # ---- Lossless card ----
+        # Quality tier preference for the Real FLAC backend. Labels are friendly;
+        # stored values are the SpotiFLAC codes "27"|"7"|"6".
+        self._lossless_quality_options = [
+            ("Hi-Res 24-bit (≤192 kHz)", "27"),
+            ("24-bit (≤96 kHz)", "7"),
+            ("16-bit / 44.1 kHz", "6"),
+        ]
+        self._lossless_quality_cb = theme.ThemedComboBox()
+        for label, _val in self._lossless_quality_options:
+            self._lossless_quality_cb.addItem(label)
+        _cur_q = str(cfg.get("lossless_quality", "27"))
+        self._lossless_quality_cb.setCurrentIndex(
+            next((i for i, (_, v) in enumerate(self._lossless_quality_options) if v == _cur_q), 0)
+        )
+        self._lossless_quality_cb.setFixedHeight(40)
+        self._lossless_quality_cb.currentIndexChanged.connect(
+            lambda i: self._save("lossless_quality", self._lossless_quality_options[i][1])
+        )
+
+        self._tidal_api_field = QLineEdit(cfg.get("tidal_api_url", ""))
+        self._tidal_api_field.setObjectName("PlaylistLink")
+        self._tidal_api_field.setPlaceholderText(
+            "https://your-tidal-api.example or http://127.0.0.1:8000  (optional)"
+        )
+        self._tidal_api_field.setFixedHeight(40)
+        self._tidal_api_field.editingFinished.connect(self._save_tidal_api)
+
+        # Fall back to YouTube (non-lossless) when no lossless source is found.
+        # Unchecked = pure-lossless: skip the track instead of grabbing a lossy
+        # copy.
+        self._lossless_fallback_cb = QCheckBox(
+            "Fall back to YouTube when no lossless source is found"
+        )
+        self._lossless_fallback_cb.setChecked(bool(cfg.get("lossless_youtube_fallback", True)))
+        self._lossless_fallback_cb.setToolTip(
+            "On: a track with no lossless source still downloads from YouTube "
+            "(not lossless). Off: that track is skipped, so only genuine lossless "
+            "files are ever saved."
+        )
+        self._lossless_fallback_cb.toggled.connect(
+            lambda on: self._save("lossless_youtube_fallback", on)
+        )
+
+        disclaimer = QLabel(
+            "Real FLAC pulls genuine lossless audio from unofficial third-party "
+            "resolvers (Qobuz / Tidal / Amazon). These hosts can rate-limit or "
+            "vanish, the Amazon/Tidal paths bypass service DRM, and use may "
+            "violate those services' Terms of Service. A custom Tidal API instance "
+            "is fully trusted with the tracks you resolve. When a lossless source "
+            "isn't available the app falls back to YouTube (not lossless) unless "
+            "you turn that off below. YouTube remains the default — this is a "
+            "deliberate opt-in."
+        )
+        disclaimer.setWordWrap(True)
+        disclaimer.setObjectName("queueEmptyHint")
+
+        lossless_card, lossless_form = self._card()
+        lossless_form.addRow("Quality", self._field(self._lossless_quality_cb, 210))
+        lossless_form.addRow("Tidal API instance", self._tidal_api_field)
+        lossless_form.addRow(self._lossless_fallback_cb)
+        lossless_form.addRow(disclaimer)
+
         body.addWidget(self._section("OUTPUT"))
         body.addWidget(out_card)
         body.addWidget(self._section("MATCHING"))
         body.addWidget(match_card)
+        body.addWidget(self._section("LOSSLESS"))
+        body.addWidget(lossless_card)
         body.addStretch(1)
 
         # Apply initial dependent-state (lossless disables bitrate, etc.)
         self._on_format_change(self._format_cb.currentText())
         self._sync_extended_enabled(self._extended_mix_cb.isChecked())
+        self._sync_lossless_enabled()
 
     def _card(self):
         card = QFrame()
@@ -1440,6 +1739,23 @@ class SettingsPanel(QWidget):
 
     def _sync_extended_enabled(self, on):
         self._max_extended_minutes_spin.setEnabled(bool(on))
+        self._extended_strict_cb.setEnabled(bool(on))
+
+    def _sync_lossless_enabled(self, *_):
+        """Grey out the LOSSLESS controls unless the Real FLAC source is selected
+        (mirrors _sync_extended_enabled)."""
+        on = self._source_options[self._source_cb.currentIndex()][1] == "lossless"
+        self._lossless_quality_cb.setEnabled(on)
+        self._tidal_api_field.setEnabled(on)
+        self._lossless_fallback_cb.setEnabled(on)
+
+    def _save_tidal_api(self):
+        """Persist the Tidal API instance (normalized: trimmed, https:// or
+        loopback http:// or empty)."""
+        value = normalize_tidal_api_url(self._tidal_api_field.text())
+        if value != self._tidal_api_field.text():
+            self._tidal_api_field.setText(value)
+        self._save("tidal_api_url", value)
 
     def _on_format_change(self, fmt):
         """Lossless formats (flac/wav) ignore the bitrate selector."""
@@ -1798,9 +2114,15 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             audio_quality=self._config.get("quality", "192"),
             extended_mix=bool(self._config.get("extended_mix", False)),
             max_extended_minutes=self._config.get("max_extended_minutes", 20),
+            extended_strict_match=bool(self._config.get("extended_strict_match", True)),
             max_track_mb=self._config.get("max_track_mb", 0),
             artist_first=self._config.get("artist_first", False),
             download_source=self._config.get("download_source", DEFAULT_DOWNLOAD_SOURCE),
+            tidal_api_url=self._config.get("tidal_api_url", ""),
+            lossless_quality=self._config.get("lossless_quality", "27"),
+            lossless_service_order=self._config.get("lossless_service_order", "qobuz,amazon"),
+            lossless_youtube_fallback=self._config.get("lossless_youtube_fallback", True),
+            flac_metadata_source=self._config.get("flac_metadata_source", "provider"),
         )
         self.scraper_thread = thread
         self._active_threads.append(thread)  # strong ref until fully finished
