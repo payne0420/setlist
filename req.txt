@@ -3,6 +3,9 @@ mutagen>=1.46.0
 PyQt5>=5.15.9
 requests>=2.32.2
 yt-dlp>=2024.8.6
+# JS-challenge solver scripts for yt-dlp's authenticated YouTube clients (the
+# Premium-cookies path); needs a JS runtime (deno) on the host at run time.
+yt-dlp-ejs>=0.8.0
 
 # lossless (Real FLAC) backend: RFC-6238 TOTP for the Spotify ISRC flow +
 # AES-GCM for the Qobuz MusicDL / Amazon proxy debug keys

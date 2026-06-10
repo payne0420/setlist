@@ -63,6 +63,11 @@ def main():
     p.add_argument("--credentials-path", default="")
     p.add_argument("--client-id", default="")
     p.add_argument("--client-secret", default="")
+    p.add_argument(
+        "--cookies-file",
+        default="",
+        help="path to a YouTube Premium cookies.txt; download-only",
+    )
     p.add_argument("--librespot-extended-yt-fallback", action="store_true")
     # lossless knobs
     p.add_argument("--tidal-api-url", default="")
@@ -99,6 +104,7 @@ def main():
         librespot_extended_yt_fallback=args.librespot_extended_yt_fallback,
         spotify_client_id=args.client_id,
         spotify_client_secret=args.client_secret,
+        youtube_cookies_file=args.cookies_file,
     )
 
     scraper.error_signal.connect(lambda m: ev("status", m), Qt.DirectConnection)

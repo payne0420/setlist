@@ -25,7 +25,9 @@ import concurrent.futures
 import contextlib
 import os
 import re
+import shutil
 import sys
+import tempfile
 import threading
 import webbrowser
 
@@ -228,6 +230,10 @@ def load_config() -> dict:
         # avoiding the hard throttle/ban on librespot's shared keymaster token.
         "spotify_client_id": "",
         "spotify_client_secret": "",
+        # Optional Netscape cookies.txt from a YouTube Premium account. Attached ONLY
+        # to yt-dlp DOWNLOAD invocations (never search) to surface the Premium-only
+        # ~256 kbps formats (774 Opus / 141 AAC). "" = disabled (anonymous, ~128 kbps).
+        "youtube_cookies_file": "",
         # In extended-mix mode, when Spotify has no extended/club mix for a track,
         # fall back to YouTube (which often hosts the 12"/extended cut) instead of
         # streaming the original Spotify track. Off by default.
@@ -282,6 +288,8 @@ def load_config() -> dict:
         )
         if defaults.get("flac_metadata_source") not in ("provider", "spotify"):
             defaults["flac_metadata_source"] = "provider"
+        if not isinstance(defaults.get("youtube_cookies_file"), str):
+            defaults["youtube_cookies_file"] = ""
         return defaults
     except (OSError, json.JSONDecodeError):
         return defaults
@@ -296,6 +304,149 @@ def save_config(config: dict) -> None:
             json.dump(config, f, indent=2)
     except OSError as exc:
         print(f"[*] Could not save config: {exc}")
+
+
+def _is_netscape_export(text: str) -> bool:
+    lines = text.splitlines()
+    non_blank = [ln for ln in lines if ln.strip()]
+    if not non_blank:
+        return False
+    first = non_blank[0].strip()
+    if first.startswith("# Netscape HTTP Cookie File") or first.startswith("# HTTP Cookie File"):
+        return True
+    for ln in lines:
+        if ln.startswith("#"):
+            continue
+        if ln.strip() and ln.count("\t") >= 6:
+            return True
+    return False
+
+
+def _cookies_to_netscape(text: str) -> list[str] | None:
+    """Parse a cookie export in any supported format into Netscape-file lines.
+
+    Detection order: Netscape (magic header or tab-separated lines) -> JSON
+    (list of name/value objects, or a {"cookies": [...]} wrapper) -> raw
+    Cookie header string. Returns None when nothing parseable is found.
+    """
+    import json
+    import time
+
+    lines = text.splitlines()
+    non_blank = [ln for ln in lines if ln.strip()]
+    if not non_blank:
+        return None
+
+    if _is_netscape_export(text):
+        return lines
+
+    stripped = text.strip()
+    if stripped.startswith("[") or stripped.startswith("{"):
+        try:
+            data = json.loads(stripped)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(data, dict) and "cookies" in data:
+            entries = data["cookies"]
+        elif isinstance(data, list):
+            entries = data
+        else:
+            return None
+        if not isinstance(entries, list):
+            return None
+        fabricated_expiry = int(time.time()) + 180 * 86400
+        netscape_lines = ["# Netscape HTTP Cookie File"]
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            if not name or not str(name).strip():
+                continue
+            if "value" not in entry:
+                continue
+            value = entry["value"]
+            domain = entry.get("domain") or ".youtube.com"
+            flag = "TRUE" if str(domain).startswith(".") else "FALSE"
+            path = entry.get("path") or "/"
+            secure = "TRUE" if entry.get("secure") else "FALSE"
+            if entry.get("expirationDate") is not None and not entry.get("session"):
+                expiry = int(entry["expirationDate"])
+            else:
+                expiry = fabricated_expiry
+            netscape_lines.append(f"{domain}\t{flag}\t{path}\t{secure}\t{expiry}\t{name}\t{value}")
+        if len(netscape_lines) <= 1:
+            return None
+        return netscape_lines
+
+    if "=" in text:
+        pairs = []
+        for part in text.split(";"):
+            part = part.strip()
+            if not part:
+                continue
+            eq_idx = part.find("=")
+            if eq_idx <= 0:
+                continue
+            name = part[:eq_idx].strip()
+            value = part[eq_idx + 1 :]
+            if name:
+                pairs.append((name, value))
+        if pairs:
+            fabricated_expiry = int(time.time()) + 180 * 86400
+            netscape_lines = ["# Netscape HTTP Cookie File"]
+            for name, value in pairs:
+                netscape_lines.append(
+                    f".youtube.com\tTRUE\t/\tTRUE\t{fabricated_expiry}\t{name}\t{value}"
+                )
+            return netscape_lines
+
+    return None
+
+
+def validate_cookies_file(path: str) -> str | None:
+    """None when *path* looks like a supported cookies export, else a short reason."""
+    if not os.path.isfile(path):
+        return "file not found"
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            data = f.read(1048576)
+    except OSError:
+        return "file is not readable"
+    lines = [ln for ln in data.splitlines() if ln.strip()]
+    if not lines:
+        return "file is empty"
+    if _cookies_to_netscape(data) is None:
+        return (
+            "not a recognized cookies export (Netscape cookies.txt, JSON, or Cookie header string)"
+        )
+    return None
+
+
+def _snapshot_cookiefile(src: str) -> str:
+    """Private temp Netscape-normalized copy for yt-dlp (never writes back to *src*)."""
+    try:
+        with open(src, encoding="utf-8", errors="replace") as f:
+            text = f.read(1048576)
+    except OSError:
+        raise
+    fd, dst = tempfile.mkstemp(prefix="setlist-ytc-", suffix=".txt")
+    try:
+        if _is_netscape_export(text):
+            with os.fdopen(fd, "wb") as dst_f, open(src, "rb") as src_f:
+                shutil.copyfileobj(src_f, dst_f)
+        else:
+            netscape_lines = _cookies_to_netscape(text)
+            if netscape_lines is None:
+                raise RuntimeError("cookie file is not a recognized export format")
+            with os.fdopen(fd, "w", encoding="utf-8") as dst_f:
+                dst_f.write("\n".join(netscape_lines) + "\n")
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        with contextlib.suppress(OSError):
+            os.remove(dst)
+        raise
+    return dst
 
 
 class MusicScraper(QThread):
@@ -334,6 +485,7 @@ class MusicScraper(QThread):
         librespot_extended_yt_fallback: bool = False,
         spotify_client_id: str = "",
         spotify_client_secret: str = "",
+        youtube_cookies_file: str = "",
     ):
         super().__init__()
         self.counter = 0  # Initialize counter to zero
@@ -408,6 +560,9 @@ class MusicScraper(QThread):
         # make_backend so the backend can build its token provider off the scraper.
         self.spotify_client_id = spotify_client_id or ""
         self.spotify_client_secret = spotify_client_secret or ""
+        self.youtube_cookies_file = (youtube_cookies_file or "").strip()
+        self._premium_status_reported = False
+        self._cookie_warning_sent = False
         self._backend = make_backend(download_source, scraper=self)
         # Rich-metadata resolver for the NON-librespot path. The librespot streaming
         # path gets album/track-number/clean-artists from the captured protobuf; the
@@ -708,44 +863,108 @@ class MusicScraper(QThread):
             "postprocessors": [postprocessor],
         }
 
+        cookie_tmp = None
+        if self.youtube_cookies_file:
+            problem = validate_cookies_file(self.youtube_cookies_file)
+            if problem is None:
+                try:
+                    cookie_tmp = _snapshot_cookiefile(self.youtube_cookies_file)
+                except (OSError, RuntimeError):
+                    problem = "file changed or became unreadable"
+            if problem is None:
+                ydl_opts["cookiefile"] = cookie_tmp
+                # web_music is only auto-added for music.youtube.com URLs; Setlist
+                # downloads www.youtube.com watch URLs, so request it explicitly to
+                # surface the Premium-only formats 774/141. "default" keeps yt-dlp's
+                # version-appropriate client list as the fallback.
+                ydl_opts["extractor_args"] = {
+                    "youtube": {"player_client": ["web_music", "default"]}
+                }
+            else:
+                self._warn_cookies_ignored(problem)
+
         expected_path = base + "." + ext
 
-        # Primary query (widened to 5 results), then a simplified fallback if
-        # the first pass produced nothing. For each, pick the duration-closest
-        # candidate (avoids grabbing the music video / wrong edit) and download
-        # that specific video. Success is decided purely by whether an audio
-        # file landed on disk, so a search with no playable source fails loudly
-        # instead of silently reporting a path that does not exist.
-        too_big = False
-        for query, pe in self._build_youtube_download_plan(search_query, fallback_query):
-            video_url = self._select_youtube_match(
-                query, expected_duration_s, prefer_extended=pe, source_title=source_title
-            )
-            if not video_url:
-                continue
-            try:
-                with YoutubeDL(ydl_opts) as ydl:
-                    ydl.extract_info(video_url, download=True)
-            except Exception:
-                # Availability/network errors are absorbed by ignoreerrors; the
-                # file-exists check below is the single source of truth.
-                pass
-            if os.path.exists(expected_path):
-                # Enforce the optional max file-size cap on the FINAL file. A
-                # too-large file is the wrong-version signal (e.g. an hour-long
-                # mix), so discard it and try the next candidate/fallback.
-                if self.max_track_bytes and os.path.getsize(expected_path) > self.max_track_bytes:
-                    too_big = True
-                    with contextlib.suppress(OSError):
-                        os.remove(expected_path)
+        try:
+            # Primary query (widened to 5 results), then a simplified fallback if
+            # the first pass produced nothing. For each, pick the duration-closest
+            # candidate (avoids grabbing the music video / wrong edit) and download
+            # that specific video. Success is decided purely by whether an audio
+            # file landed on disk, so a search with no playable source fails loudly
+            # instead of silently reporting a path that does not exist.
+            too_big = False
+            for query, pe in self._build_youtube_download_plan(search_query, fallback_query):
+                video_url = self._select_youtube_match(
+                    query, expected_duration_s, prefer_extended=pe, source_title=source_title
+                )
+                if not video_url:
                     continue
-                return expected_path, pe
+                info = None
+                try:
+                    with YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(video_url, download=True)
+                except Exception:
+                    # Availability/network errors are absorbed by ignoreerrors; the
+                    # file-exists check below is the single source of truth.
+                    pass
+                if os.path.exists(expected_path):
+                    # Enforce the optional max file-size cap on the FINAL file. A
+                    # too-large file is the wrong-version signal (e.g. an hour-long
+                    # mix), so discard it and try the next candidate/fallback.
+                    if (
+                        self.max_track_bytes
+                        and os.path.getsize(expected_path) > self.max_track_bytes
+                    ):
+                        too_big = True
+                        with contextlib.suppress(OSError):
+                            os.remove(expected_path)
+                        continue
+                    if cookie_tmp:
+                        self._report_premium_status(info)
+                    return expected_path, pe
 
-        if too_big:
-            raise RuntimeError(
-                f"track exceeds the {self.max_track_bytes // (1024 * 1024)} MB size limit"
+            if too_big:
+                raise RuntimeError(
+                    f"track exceeds the {self.max_track_bytes // (1024 * 1024)} MB size limit"
+                )
+            raise RuntimeError("no playable audio source found on YouTube for this track")
+        finally:
+            if cookie_tmp:
+                with contextlib.suppress(OSError):
+                    os.remove(cookie_tmp)
+
+    def _warn_cookies_ignored(self, problem):
+        with self._counter_lock:
+            if self._cookie_warning_sent:
+                return
+            self._cookie_warning_sent = True
+        self.error_signal.emit(
+            f"YouTube cookies file ignored ({problem}) — downloading anonymously"
+        )
+
+    def _report_premium_status(self, info):
+        """Emit (once per run) whether the cookies actually unlocked Premium audio.
+
+        The honest signal is the SOURCE format id yt-dlp picked: 774 (Opus ~256k)
+        and 141 (AAC ~256k) exist only for Premium accounts. Post-transcode bitrate
+        cannot prove source quality, so it is not used.
+        """
+        fid = str((info or {}).get("format_id") or "")
+        if not fid:
+            return
+        with self._counter_lock:
+            if self._premium_status_reported:
+                return
+            self._premium_status_reported = True
+        if fid in ("774", "141"):
+            self.error_signal.emit(
+                f"YouTube Premium quality active (source format {fid}, ~256 kbps)"
             )
-        raise RuntimeError("no playable audio source found on YouTube for this track")
+        else:
+            self.error_signal.emit(
+                f"YouTube cookies set, but Premium formats not served (source format {fid}) — "
+                "check the account is Premium and the cookies are freshly exported"
+            )
 
     def _resolve_extended_output(
         self,
@@ -1391,6 +1610,7 @@ class ScraperThread(QThread):
         librespot_extended_yt_fallback: bool = False,
         spotify_client_id: str = "",
         spotify_client_secret: str = "",
+        youtube_cookies_file: str = "",
     ):
         super().__init__()
         self.spotify_link = spotify_link
@@ -1416,6 +1636,7 @@ class ScraperThread(QThread):
             librespot_extended_yt_fallback=librespot_extended_yt_fallback,
             spotify_client_id=spotify_client_id,
             spotify_client_secret=spotify_client_secret,
+            youtube_cookies_file=youtube_cookies_file,
         )
         # Capture the terminal status string synchronously IN the worker thread.
         # PlaylistCompleted is emitted from run()'s thread; a DirectConnection
@@ -1920,11 +2141,14 @@ class SettingsPanel(QWidget):
 
         # ---- Spotify account card (librespot backend) ----
         self._spotify_card = self._build_spotify_card(cfg)
+        self._youtube_card = self._build_youtube_card(cfg)
 
         body.addWidget(self._section("OUTPUT"))
         body.addWidget(out_card)
         body.addWidget(self._section("MATCHING"))
         body.addWidget(match_card)
+        body.addWidget(self._section("YOUTUBE ACCOUNT"))
+        body.addWidget(self._youtube_card)
         body.addWidget(self._section("LOSSLESS"))
         body.addWidget(lossless_card)
         body.addWidget(self._section("SPOTIFY ACCOUNT"))
@@ -1939,6 +2163,8 @@ class SettingsPanel(QWidget):
         self._sync_lossless_enabled()
         self._refresh_spotify_status()
         self._sync_spotify_card_enabled()
+        self._sync_youtube_card_enabled()
+        self._refresh_youtube_cookies_status()
 
         # The panel lives in a scroll area, so a wheel tick over a combo/spin
         # must scroll the page — not silently edit the setting under the cursor
@@ -2046,6 +2272,90 @@ class SettingsPanel(QWidget):
         "Setlist ships no credentials; you log in with your own account. YouTube stays "
         "the default source."
     )
+
+    _YOUTUBE_COOKIES_HELP = (
+        "Optional — only helps with a YouTube Premium account: downloads can then use "
+        "YouTube's higher-bitrate audio (~256 kbps instead of ~128 kbps). Free accounts "
+        "gain nothing. Accepts a Netscape cookies.txt, a JSON cookie export, or a raw "
+        "Cookie header string — export from a private/incognito window logged into "
+        "YouTube, then close that window (YouTube rotates cookies in open sessions). "
+        "Cookies are used only for downloads, never for searches, and also apply when "
+        "other sources fall back to YouTube. Using your account with a downloader can "
+        "put it at risk — a separate account is recommended. Requires the deno "
+        "JavaScript runtime (brew install deno) — without it YouTube rejects "
+        "authenticated downloads."
+    )
+
+    def _build_youtube_card(self, cfg):
+        self._yt_cookies_field = QLineEdit(cfg.get("youtube_cookies_file") or "")
+        self._yt_cookies_field.setObjectName("PlaylistLink")
+        self._yt_cookies_field.setFixedHeight(40)
+        self._yt_cookies_field.setPlaceholderText(
+            "Path to YouTube cookies export (.txt or .json, optional)"
+        )
+        self._yt_cookies_field.editingFinished.connect(self._save_youtube_cookies)
+
+        browse_btn = QPushButton("Browse…")
+        browse_btn.setObjectName("QueueBtn")
+        browse_btn.setFixedHeight(40)
+        browse_btn.setMinimumWidth(110)
+        browse_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        browse_btn.clicked.connect(self._browse_youtube_cookies)
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addWidget(self._yt_cookies_field, 1)
+        row.addWidget(browse_btn)
+
+        self._yt_cookies_status_lbl = QLabel("")
+        self._yt_cookies_status_lbl.setWordWrap(True)
+        self._yt_cookies_status_lbl.setObjectName("subtleLabel")
+
+        help_lbl = QLabel(self._YOUTUBE_COOKIES_HELP)
+        help_lbl.setWordWrap(True)
+        help_lbl.setObjectName("subtleLabel")
+
+        card, form = self._card()
+        form.addRow("Cookies file", row)
+        form.addRow(self._yt_cookies_status_lbl)
+        form.addRow(help_lbl)
+        return card
+
+    def _browse_youtube_cookies(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select YouTube cookies export",
+            os.path.expanduser("~"),
+            "Cookie exports (*.txt *.json);;All files (*)",
+        )
+        if path:
+            self._yt_cookies_field.setText(path)
+            self._save_youtube_cookies()
+
+    def _save_youtube_cookies(self):
+        path = self._yt_cookies_field.text().strip()
+        if not path:
+            self._save("youtube_cookies_file", "")
+        elif validate_cookies_file(path) is None:
+            self._save("youtube_cookies_file", path)
+        self._refresh_youtube_cookies_status()
+
+    def _refresh_youtube_cookies_status(self):
+        path = self._yt_cookies_field.text().strip()
+        if not path:
+            self._yt_cookies_status_lbl.setText(
+                "Disabled — YouTube downloads run anonymously (~128 kbps max)."
+            )
+            return
+        reason = validate_cookies_file(path)
+        if reason is None:
+            self._yt_cookies_status_lbl.setText(
+                "Cookies set — Premium formats will be requested on downloads."
+            )
+        else:
+            self._yt_cookies_status_lbl.setText(f"Not saved — {reason}.")
+
+    def _sync_youtube_card_enabled(self):
+        self._youtube_card.setEnabled(self._current_source() == "youtube")
 
     def _build_spotify_card(self, cfg):
         """Build the SPOTIFY ACCOUNT card: login/logout, account+Premium status, the
@@ -2155,6 +2465,7 @@ class SettingsPanel(QWidget):
                 self._source_cb.blockSignals(False)
                 self._sync_lossless_enabled()
                 self._sync_spotify_card_enabled()
+                self._sync_youtube_card_enabled()
                 return
             self._save("librespot_consented", True)
         self._source_index = index
@@ -2162,6 +2473,7 @@ class SettingsPanel(QWidget):
         self._sync_format_choices()
         self._sync_lossless_enabled()
         self._sync_spotify_card_enabled()
+        self._sync_youtube_card_enabled()
 
     def _confirm_librespot_consent(self):
         box = QMessageBox(self)
@@ -2652,6 +2964,7 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             ),
             spotify_client_id=self._config.get("spotify_client_id", ""),
             spotify_client_secret=self._config.get("spotify_client_secret", ""),
+            youtube_cookies_file=self._config.get("youtube_cookies_file", ""),
         )
         self.scraper_thread = thread
         self._active_threads.append(thread)  # strong ref until fully finished

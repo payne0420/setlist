@@ -2135,3 +2135,434 @@ class TestMaxTrackSize:
             mock_ydl.return_value.__exit__ = MagicMock(return_value=False)
             result, _ = scraper.download_track_audio("ytsearch1:Song Artist audio", dest)
         assert result == dest  # no cap -> kept regardless of size
+
+
+def _valid_cookie_file(tmp_path):
+    p = tmp_path / "cookies.txt"
+    p.write_text("# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tsecret\n")
+    return str(p)
+
+
+def _download_track_with_stub_match(scraper, dest, mock_ydl, exists=True):
+    url = "https://www.youtube.com/watch?v=abc"
+    patches = [
+        patch("Spotify_Downloader.get_ffmpeg_path", return_value="/usr/bin"),
+        patch.object(scraper, "_select_youtube_match", return_value=url),
+        patch("Spotify_Downloader.YoutubeDL", mock_ydl),
+    ]
+    if exists:
+        patches.append(patch("os.path.exists", return_value=True))
+    ctx = contextlib.ExitStack()
+    for p in patches:
+        ctx.enter_context(p)
+    mock_ydl.return_value.__enter__ = MagicMock(return_value=mock_ydl)
+    mock_ydl.return_value.__exit__ = MagicMock(return_value=False)
+    with ctx, contextlib.suppress(Exception):
+        scraper.download_track_audio("test query", dest)
+    return mock_ydl.call_args[0][0] if mock_ydl.call_args else {}
+
+
+class TestYoutubePremiumCookies:
+    """Tests for optional YouTube Premium cookies on download-only yt-dlp calls."""
+
+    def test_no_cookie_keys_when_unset(self, tmp_path):
+        from Spotify_Downloader import MusicScraper
+
+        scraper = MusicScraper()
+        dest = str(tmp_path / "track.mp3")
+        mock_ydl = MagicMock()
+        opts = _download_track_with_stub_match(scraper, dest, mock_ydl)
+        assert "cookiefile" not in opts
+        assert "extractor_args" not in opts
+
+    def test_cookiefile_and_web_music_client_when_set(self, tmp_path):
+        from Spotify_Downloader import MusicScraper
+
+        cookie_path = _valid_cookie_file(tmp_path)
+        with open(cookie_path, encoding="utf-8") as src:
+            source_content = src.read()
+        scraper = MusicScraper(youtube_cookies_file=cookie_path)
+        dest = str(tmp_path / "track.mp3")
+        all_opts = []
+        snap_content = []
+
+        def ydl_factory(opts):
+            all_opts.append(opts)
+            if opts.get("cookiefile"):
+                with open(opts["cookiefile"], encoding="utf-8") as snap:
+                    snap_content.append(snap.read())
+            mock = MagicMock()
+            mock.__enter__ = MagicMock(return_value=mock)
+            mock.__exit__ = MagicMock(return_value=False)
+            return mock
+
+        with (
+            patch("Spotify_Downloader.get_ffmpeg_path", return_value="/usr/bin"),
+            patch.object(scraper, "_select_youtube_match", return_value="https://youtu.be/x"),
+            patch("Spotify_Downloader.YoutubeDL", side_effect=ydl_factory),
+            patch("os.path.exists", return_value=True),
+        ):
+            scraper.download_track_audio("test query", dest)
+        download_opts = [o for o in all_opts if not o.get("extract_flat")]
+        opts = download_opts[0]
+        assert opts["extractor_args"] == {"youtube": {"player_client": ["web_music", "default"]}}
+        assert opts["cookiefile"] != cookie_path
+        assert snap_content[0] == source_content
+
+    def test_temp_cookie_snapshot_cleaned_up(self, tmp_path):
+        from Spotify_Downloader import MusicScraper
+
+        cookie_path = _valid_cookie_file(tmp_path)
+        scraper = MusicScraper(youtube_cookies_file=cookie_path)
+        dest = str(tmp_path / "track.mp3")
+        mock_ydl = MagicMock()
+        opts = _download_track_with_stub_match(scraper, dest, mock_ydl)
+        assert not os.path.exists(opts["cookiefile"])
+
+    def test_snapshot_failure_falls_back_anonymous(self, tmp_path):
+        from Spotify_Downloader import MusicScraper
+
+        cookie_path = _valid_cookie_file(tmp_path)
+        scraper = MusicScraper(youtube_cookies_file=cookie_path)
+        messages = []
+        scraper.error_signal.connect(messages.append)
+        dest = str(tmp_path / "track.mp3")
+        url = "https://www.youtube.com/watch?v=abc"
+        with (
+            patch("Spotify_Downloader.get_ffmpeg_path", return_value="/usr/bin"),
+            patch.object(scraper, "_select_youtube_match", return_value=url),
+            patch("Spotify_Downloader._snapshot_cookiefile", side_effect=OSError("gone")),
+            patch("Spotify_Downloader.YoutubeDL") as mock_ydl,
+            patch("os.path.exists", return_value=True),
+        ):
+            mock_ydl.return_value.__enter__ = MagicMock(return_value=mock_ydl)
+            mock_ydl.return_value.__exit__ = MagicMock(return_value=False)
+            result, _ = scraper.download_track_audio("test query", dest)
+        opts = mock_ydl.call_args[0][0]
+        assert result == dest
+        assert "cookiefile" not in opts
+        assert "extractor_args" not in opts
+        assert len([m for m in messages if "ignored" in m]) == 1
+
+    def test_invalid_cookie_file_downloads_anonymously(self, tmp_path):
+        from Spotify_Downloader import MusicScraper
+
+        bad = tmp_path / "bad.txt"
+        bad.write_text('{"json": "garbage"}')
+        scraper = MusicScraper(youtube_cookies_file=str(bad))
+        messages = []
+        scraper.error_signal.connect(messages.append)
+        dest = str(tmp_path / "track.mp3")
+        mock_ydl = MagicMock()
+        opts = _download_track_with_stub_match(scraper, dest, mock_ydl)
+        assert "cookiefile" not in opts
+        assert "extractor_args" not in opts
+        assert len([m for m in messages if "ignored" in m]) == 1
+
+    def test_missing_cookie_file_downloads_anonymously(self, tmp_path):
+        from Spotify_Downloader import MusicScraper
+
+        scraper = MusicScraper(youtube_cookies_file=str(tmp_path / "missing.txt"))
+        dest = str(tmp_path / "track.mp3")
+        mock_ydl = MagicMock()
+        opts = _download_track_with_stub_match(scraper, dest, mock_ydl)
+        assert "cookiefile" not in opts
+        assert "extractor_args" not in opts
+
+    def test_search_opts_never_get_cookies(self, tmp_path):
+        from Spotify_Downloader import MusicScraper
+
+        cookie_path = _valid_cookie_file(tmp_path)
+        scraper = MusicScraper(youtube_cookies_file=cookie_path)
+        dest = str(tmp_path / "track.mp3")
+        all_opts = []
+
+        def ydl_factory(opts):
+            all_opts.append(opts)
+            mock = MagicMock()
+            mock.__enter__ = MagicMock(return_value=mock)
+            mock.__exit__ = MagicMock(return_value=False)
+            if opts.get("extract_flat"):
+                mock.extract_info = MagicMock(
+                    return_value={"entries": [{"id": "abc", "title": "Song", "duration": 180}]}
+                )
+            else:
+                mock.extract_info = MagicMock(return_value={"format_id": "251"})
+            return mock
+
+        with (
+            patch("Spotify_Downloader.get_ffmpeg_path", return_value="/usr/bin"),
+            patch("Spotify_Downloader.YoutubeDL", side_effect=ydl_factory),
+            patch("os.path.exists", return_value=True),
+        ):
+            scraper.download_track_audio("Song Artist", dest, expected_duration_s=180)
+
+        search_opts = [o for o in all_opts if o.get("extract_flat")]
+        download_opts = [o for o in all_opts if not o.get("extract_flat")]
+        assert search_opts
+        assert download_opts
+        for opts in search_opts:
+            assert "cookiefile" not in opts
+            assert "extractor_args" not in opts
+
+    def test_premium_format_reported_once(self, tmp_path):
+        from Spotify_Downloader import MusicScraper
+
+        cookie_path = _valid_cookie_file(tmp_path)
+        scraper = MusicScraper(youtube_cookies_file=cookie_path)
+        messages = []
+        scraper.error_signal.connect(messages.append)
+        dest = str(tmp_path / "track.mp3")
+        url = "https://www.youtube.com/watch?v=abc"
+        with (
+            patch("Spotify_Downloader.get_ffmpeg_path", return_value="/usr/bin"),
+            patch.object(scraper, "_select_youtube_match", return_value=url),
+            patch("Spotify_Downloader.YoutubeDL") as mock_ydl,
+            patch("os.path.exists", return_value=True),
+        ):
+            mock_ydl.return_value.__enter__ = MagicMock(return_value=mock_ydl)
+            mock_ydl.return_value.__exit__ = MagicMock(return_value=False)
+            mock_ydl.extract_info = MagicMock(return_value={"format_id": "774"})
+            scraper.download_track_audio("test query", dest)
+            scraper.download_track_audio("test query", dest)
+        premium_msgs = [m for m in messages if "Premium quality active" in m]
+        assert len(premium_msgs) == 1
+
+    def test_non_premium_format_warns_once(self, tmp_path):
+        from Spotify_Downloader import MusicScraper
+
+        cookie_path = _valid_cookie_file(tmp_path)
+        scraper = MusicScraper(youtube_cookies_file=cookie_path)
+        messages = []
+        scraper.error_signal.connect(messages.append)
+        dest = str(tmp_path / "track.mp3")
+        url = "https://www.youtube.com/watch?v=abc"
+        with (
+            patch("Spotify_Downloader.get_ffmpeg_path", return_value="/usr/bin"),
+            patch.object(scraper, "_select_youtube_match", return_value=url),
+            patch("Spotify_Downloader.YoutubeDL") as mock_ydl,
+            patch("os.path.exists", return_value=True),
+        ):
+            mock_ydl.return_value.__enter__ = MagicMock(return_value=mock_ydl)
+            mock_ydl.return_value.__exit__ = MagicMock(return_value=False)
+            mock_ydl.extract_info = MagicMock(return_value={"format_id": "251"})
+            scraper.download_track_audio("test query", dest)
+            scraper.download_track_audio("test query", dest)
+        warn_msgs = [m for m in messages if "Premium formats not served" in m]
+        assert len(warn_msgs) == 1
+
+
+class TestValidateCookiesFile:
+    def test_accepts_netscape_magic(self, tmp_path):
+        from Spotify_Downloader import validate_cookies_file
+
+        p = tmp_path / "c.txt"
+        p.write_text("# Netscape HTTP Cookie File\n")
+        assert validate_cookies_file(str(p)) is None
+
+    def test_accepts_headerless_tab_lines(self, tmp_path):
+        from Spotify_Downloader import validate_cookies_file
+
+        p = tmp_path / "c.txt"
+        p.write_text(".youtube.com\tTRUE\t/\tTRUE\t0\tSID\tsecret\n")
+        assert validate_cookies_file(str(p)) is None
+
+    def test_rejects_garbage_file(self, tmp_path):
+        from Spotify_Downloader import validate_cookies_file
+
+        p = tmp_path / "c.txt"
+        p.write_text("hello world\nnothing here")
+        reason = validate_cookies_file(str(p))
+        assert reason is not None
+        assert "not a recognized" in reason
+
+    def test_rejects_missing_path(self, tmp_path):
+        from Spotify_Downloader import validate_cookies_file
+
+        assert validate_cookies_file(str(tmp_path / "nope.txt")) == "file not found"
+
+    def test_rejects_empty_file(self, tmp_path):
+        from Spotify_Downloader import validate_cookies_file
+
+        p = tmp_path / "c.txt"
+        p.write_text("")
+        assert validate_cookies_file(str(p)) == "file is empty"
+
+
+class TestCookieFormatConversion:
+    def test_netscape_passthrough_is_byte_identical(self, tmp_path):
+        from Spotify_Downloader import _snapshot_cookiefile
+
+        src = tmp_path / "cookies.txt"
+        content = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tsecret\n"
+        src.write_text(content)
+        snap = _snapshot_cookiefile(str(src))
+        try:
+            with open(snap, encoding="utf-8") as f:
+                assert f.read() == content
+        finally:
+            os.remove(snap)
+
+    def test_netscape_crlf_snapshot_byte_identical(self, tmp_path):
+        from Spotify_Downloader import _snapshot_cookiefile
+
+        src = tmp_path / "cookies.txt"
+        content = "# Netscape HTTP Cookie File\r\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tv"
+        with open(src, "w", newline="") as f:
+            f.write(content)
+        snap = _snapshot_cookiefile(str(src))
+        try:
+            with open(src, "rb") as f:
+                source_bytes = f.read()
+            with open(snap, "rb") as f:
+                snap_bytes = f.read()
+            assert snap_bytes == source_bytes
+        finally:
+            os.remove(snap)
+
+    def test_json_export_converts(self, tmp_path):
+        import json
+        import time
+
+        from Spotify_Downloader import _snapshot_cookiefile
+
+        cookies = [
+            {
+                "name": "SID",
+                "value": "abc123",
+                "domain": ".youtube.com",
+                "path": "/",
+                "secure": True,
+                "expirationDate": 2000000000.5,
+            },
+            {
+                "name": "HSID",
+                "value": "sessval",
+                "session": True,
+            },
+        ]
+        src = tmp_path / "cookies.json"
+        src.write_text(json.dumps(cookies))
+        snap = _snapshot_cookiefile(str(src))
+        try:
+            with open(snap, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+            assert lines[0] == "# Netscape HTTP Cookie File"
+            assert len(lines) == 3
+            sid_parts = lines[1].split("\t")
+            assert sid_parts[0] == ".youtube.com"
+            assert sid_parts[1] == "TRUE"
+            assert sid_parts[2] == "/"
+            assert sid_parts[3] == "TRUE"
+            assert sid_parts[4] == "2000000000"
+            assert sid_parts[5] == "SID"
+            assert sid_parts[6] == "abc123"
+            hsid_parts = lines[2].split("\t")
+            assert hsid_parts[0] == ".youtube.com"
+            assert hsid_parts[5] == "HSID"
+            assert hsid_parts[6] == "sessval"
+            assert int(hsid_parts[4]) > int(time.time())
+        finally:
+            os.remove(snap)
+
+    def test_json_cookies_wrapper_accepted(self, tmp_path):
+        import json
+
+        from Spotify_Downloader import validate_cookies_file
+
+        p = tmp_path / "wrapped.json"
+        p.write_text(json.dumps({"cookies": [{"name": "SID", "value": "x"}]}))
+        assert validate_cookies_file(str(p)) is None
+
+    def test_json_without_name_value_rejected(self, tmp_path):
+        from Spotify_Downloader import validate_cookies_file
+
+        p = tmp_path / "bad.json"
+        p.write_text('[{"foo": 1}]')
+        reason = validate_cookies_file(str(p))
+        assert reason is not None
+        assert "not a recognized" in reason
+
+    def test_header_string_converts(self, tmp_path):
+        from Spotify_Downloader import _snapshot_cookiefile
+
+        src = tmp_path / "header.txt"
+        src.write_text("SID=abc; __Secure-1PSID=def")
+        snap = _snapshot_cookiefile(str(src))
+        try:
+            with open(snap, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+            assert lines[0] == "# Netscape HTTP Cookie File"
+            assert len(lines) == 3
+            sid_parts = lines[1].split("\t")
+            assert sid_parts[0] == ".youtube.com"
+            assert sid_parts[1] == "TRUE"
+            assert sid_parts[2] == "/"
+            assert sid_parts[3] == "TRUE"
+            assert sid_parts[5] == "SID"
+            assert sid_parts[6] == "abc"
+            psid_parts = lines[2].split("\t")
+            assert psid_parts[5] == "__Secure-1PSID"
+            assert psid_parts[6] == "def"
+        finally:
+            os.remove(snap)
+
+    def test_header_value_with_equals_preserved(self, tmp_path):
+        from Spotify_Downloader import _snapshot_cookiefile
+
+        src = tmp_path / "header.txt"
+        src.write_text("LOGIN_INFO=a=b=c")
+        snap = _snapshot_cookiefile(str(src))
+        try:
+            with open(snap, encoding="utf-8") as f:
+                parts = f.read().splitlines()[1].split("\t")
+            assert parts[5] == "LOGIN_INFO"
+            assert parts[6] == "a=b=c"
+        finally:
+            os.remove(snap)
+
+    def test_validate_accepts_all_three_formats(self, tmp_path):
+        import json
+
+        from Spotify_Downloader import validate_cookies_file
+
+        netscape = tmp_path / "n.txt"
+        netscape.write_text("# Netscape HTTP Cookie File\n")
+        json_f = tmp_path / "j.json"
+        json_f.write_text(json.dumps([{"name": "SID", "value": "v"}]))
+        header = tmp_path / "h.txt"
+        header.write_text("SID=abc")
+        assert validate_cookies_file(str(netscape)) is None
+        assert validate_cookies_file(str(json_f)) is None
+        assert validate_cookies_file(str(header)) is None
+
+
+class TestConfigYoutubeCookies:
+    def test_default_is_empty(self, tmp_path, monkeypatch):
+        from Spotify_Downloader import load_config
+
+        monkeypatch.setattr(
+            "Spotify_Downloader._config_path", lambda: str(tmp_path / "config.json")
+        )
+        assert load_config()["youtube_cookies_file"] == ""
+
+    def test_round_trip_persists_path(self, tmp_path, monkeypatch):
+        from Spotify_Downloader import load_config, save_config
+
+        cfg_path = tmp_path / "config.json"
+        monkeypatch.setattr("Spotify_Downloader._config_path", lambda: str(cfg_path))
+        path = str(tmp_path / "cookies.txt")
+        config = load_config()
+        config["youtube_cookies_file"] = path
+        save_config(config)
+        assert load_config()["youtube_cookies_file"] == path
+
+    def test_non_string_coerced_to_empty(self, tmp_path, monkeypatch):
+        import json
+
+        from Spotify_Downloader import load_config
+
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"youtube_cookies_file": 123}))
+        monkeypatch.setattr("Spotify_Downloader._config_path", lambda: str(cfg))
+        assert load_config()["youtube_cookies_file"] == ""
