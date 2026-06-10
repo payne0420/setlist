@@ -133,7 +133,8 @@ QT_QPA_PLATFORM=offscreen ./.venv/bin/python scripts/e2e_driver.py \
 | librespot resume | rerun the same `--out` | manifest skips done tracks, fetches only missing |
 | librespot extended | `--source librespot --format ogg --extended --fallback-order youtube --client-id <ID> --client-secret <SECRET>` | client-credentials search (no 429), strict-title YT extended or clean per-track failure |
 | lossless via Tidal | `--source lossless --format flac --tidal-api-url http://127.0.0.1:8000` | genuine FLAC at native mixed formats (44.1/16 … 192/24), provider tags + art |
-| lossless fallback | `--source lossless --format flac --fallback-order youtube` with services dead/absent | honest **mp3 320** + "MP3 320k, not lossless" status + `via_youtube_fallback: true` — never flac/wav from a lossy source |
+| YouTube original | `--source youtube --format original` | opus/m4a at source bitrate, no transcode, tags incl. `.opus` |
+| lossless fallback | `--source lossless --format flac --fallback-order youtube` with services dead/absent | honest lossy container (`.opus`/`.m4a`) + "not lossless" status + `via_youtube_fallback: true` — never flac/wav from a lossy source |
 | pure lossless | add `--fallback-order ""`, services failing | every track fails loudly, **zero files** |
 | metadata A/B | one track, `--flac-metadata-source spotify` vs `provider` | tags switch release (provider = same release as the bytes) |
 
@@ -151,7 +152,9 @@ the orchestrating agent) must assert, per run:
 1. **File count** == expected tracks (cross-check `_e2e_events.json` `done`/`count`
    events and any `Error downloading` statuses).
 2. **Codec/container** matches the run's promise (vorbis for librespot, flac for
-   Tidal-served, mp3 for fallbacks — `magic` column agrees: `OggS`/`fLaC`/`ID3`).
+   Tidal-served, opus/m4a for fallbacks — `magic` column agrees: vorbis → `OggS`,
+   flac → `fLaC`, mp3 → `ID3`, opus → `OggS`, m4a → `ftyp`; `.webm` (EBML) is the
+   PP-failure corner now allowed by the verifier).
 3. **True bitrate** in the genuine range (see signatures in the script docstring).
    Fake-lossless signature: uniform 48 kHz + `Lavf` encoder + sparse tags. The 19 kHz
    spectral check does NOT catch Opus-sourced fakes — use the signature set plus the
@@ -161,7 +164,7 @@ the orchestrating agent) must assert, per run:
    FLAC vorbis-comments + pictures; OGG vorbis-comments + `metadata_block_picture`
    (macOS Finder won't render it — player limitation, verify bytes); MP3 ID3 + APIC.
 5. **Fallback provenance**: every `via_youtube_fallback: true` file is an honest lossy
-   container; every genuine-source file is not.
+   container (`.opus`/`.m4a`, never flac/wav); every genuine-source file is not.
 
 ## Phase 7 — Pre-push audit, then push
 

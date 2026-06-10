@@ -106,8 +106,8 @@ class TestAdvanceAbort:
         )
         assert path == "/yt.mp3"
         assert len(FakeLeaf.calls) == 2
-        assert FakeLeaf.calls[1]["audio_format"] == "mp3"
-        assert FakeLeaf.calls[1]["audio_quality"] == "320"
+        assert FakeLeaf.calls[1]["audio_format"] == "original"
+        assert FakeLeaf.calls[1]["audio_quality"] == "192"
 
     def test_librespot_not_premium_advances(self):
         lib = FakeLeaf("librespot")
@@ -123,8 +123,8 @@ class TestAdvanceAbort:
             audio_quality="192",
             cancel=_no_cancel,
         )
-        assert FakeLeaf.calls[1]["audio_format"] == "mp3"
-        assert FakeLeaf.calls[1]["audio_quality"] == "320"
+        assert FakeLeaf.calls[1]["audio_format"] == "original"
+        assert FakeLeaf.calls[1]["audio_quality"] == "192"
 
     def test_librespot_unavailable_advances(self):
         lib = FakeLeaf("librespot")
@@ -420,7 +420,7 @@ class TestWarningEmission:
             audio_quality="192",
             cancel=_no_cancel,
         )
-        assert any("MP3 320k" in m for m in emitted)
+        assert any("not lossless" in m for m in emitted)
 
     def test_no_extended_cut_message(self):
         emitted = []
@@ -437,6 +437,22 @@ class TestWarningEmission:
             cancel=_no_cancel,
         )
         assert any("No extended mix on Spotify" in m for m in emitted)
+
+    def test_youtube_fallback_step_uses_original(self):
+        FakeLeaf.calls = []
+        lossless = FakeLeaf("lossless")
+        lossless.exc = NotFoundOnServiceError("no lossless source found")
+        yt = FakeLeaf("youtube")
+        _chain("lossless", [lossless, yt]).fetch(
+            track=_track(),
+            destination="/tmp/s.mp3",
+            extended=False,
+            audio_format="flac",
+            audio_quality="256",
+            cancel=_no_cancel,
+        )
+        assert FakeLeaf.calls[1]["audio_format"] == "original"
+        assert FakeLeaf.calls[1]["audio_quality"] == "256"
 
 
 class TestValidateFallbackOrder:

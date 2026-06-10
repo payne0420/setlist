@@ -106,6 +106,20 @@ class TestYouTubeBackendFetch:
         assert path == "/tmp/song.flac"
         assert ext == "flac"  # derived from the real file, not the destination
 
+    def test_actual_ext_opus_from_returned_path(self):
+        s = MusicScraper()
+        s.download_track_audio = lambda _q, _d, **_kw: ("/tmp/song.opus", False)
+        path, ext, used = s._backend.fetch(
+            track=_track(),
+            destination="/tmp/song.mp3",
+            extended=False,
+            audio_format="original",
+            audio_quality="192",
+            cancel=s.is_cancelled,
+        )
+        assert path == "/tmp/song.opus"
+        assert ext == "opus"
+
     def test_fetch_forwards_audio_format_and_quality_normal(self):
         s = MusicScraper(audio_format="flac")
         seen = {}
@@ -260,8 +274,13 @@ class TestSourceFormats:
         return sd.load_config()
 
     def test_youtube_offers_only_lossy_formats(self):
+        """YouTube offers only lossy transcode targets plus the no-transcode passthrough."""
         for fmt in sd.SOURCE_FORMATS["youtube"]:
-            assert sd.SUPPORTED_FORMATS[fmt]["lossy"]
+            info = sd.SUPPORTED_FORMATS[fmt]
+            if fmt == "original":
+                assert info.get("passthrough") and not info["lossy"]
+            else:
+                assert info["lossy"]
 
     def test_config_flac_plus_youtube_resets_to_mp3(self, tmp_path, monkeypatch):
         loaded = self._load(tmp_path, monkeypatch, {"format": "flac"})

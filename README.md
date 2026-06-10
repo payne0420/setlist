@@ -27,7 +27,7 @@ art. It's a desktop app (PyQt5).
 | YouTube sourcing via `yt-dlp`, duration-locked match | ✅ | ✅ |
 | Resume manifest for large playlists | ✅ | ✅ |
 | Parallel track downloads | ✅ | ✅ |
-| Formats: mp3 / m4a / opus / flac / wav + bitrate | ✅ | ✅ |
+| Formats: mp3 / m4a / opus / original (no re-encode) / flac / wav + bitrate | ✅ | ✅ |
 | ID3 tags + embedded cover art | ✅ | ✅ |
 
 > The rows marked ✅ on both sides are upstream's work that Setlist inherits —

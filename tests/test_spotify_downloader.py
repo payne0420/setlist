@@ -8,6 +8,7 @@ import sys
 import threading
 from unittest.mock import MagicMock, patch
 
+import pytest
 import requests
 
 
@@ -340,6 +341,206 @@ class TestDownloadTrackAudioOpts:
             pp = download_opts["postprocessors"][0]
             assert pp["preferredcodec"] == "flac"
             assert "preferredquality" not in pp
+
+
+class TestOriginalPassthrough:
+    """Tests for the original (no-transcode) YouTube download format."""
+
+    @staticmethod
+    def _scraper(**kw):
+        from Spotify_Downloader import MusicScraper
+
+        return MusicScraper(**kw)
+
+    def test_ydl_opts_use_best_codec_no_quality(self):
+        """With audio_format=original, PP uses preferredcodec=best and no quality."""
+        scraper = self._scraper(audio_format="mp3", audio_quality="192")
+        url = "https://www.youtube.com/watch?v=abc"
+        with (
+            patch("Spotify_Downloader.get_ffmpeg_path", return_value="/usr/bin"),
+            patch.object(scraper, "_select_youtube_match", return_value=url),
+            patch("Spotify_Downloader.YoutubeDL") as mock_ydl,
+        ):
+            mock_ydl.return_value.__enter__ = MagicMock(return_value=mock_ydl)
+            mock_ydl.return_value.__exit__ = MagicMock(return_value=False)
+            with contextlib.suppress(Exception):
+                scraper.download_track_audio(
+                    "test query", "/tmp/test.mp3", audio_format="original", audio_quality="320"
+                )
+            pp = mock_ydl.call_args[0][0]["postprocessors"][0]
+            assert pp["preferredcodec"] == "best"
+            assert "preferredquality" not in pp
+
+    def test_final_path_from_info_dict(self, tmp_path):
+        from Spotify_Downloader import MusicScraper
+
+        scraper = MusicScraper()
+        dest_base = str(tmp_path / "Song")
+        opus_path = tmp_path / "Song.opus"
+        opus_path.write_bytes(b"opus")
+        url = "https://www.youtube.com/watch?v=abc"
+        info = {"requested_downloads": [{"filepath": str(opus_path)}], "format_id": "251"}
+        with (
+            patch("Spotify_Downloader.get_ffmpeg_path", return_value="/usr/bin"),
+            patch.object(scraper, "_select_youtube_match", return_value=url),
+            patch("Spotify_Downloader.YoutubeDL") as mock_ydl,
+        ):
+            mock_ydl.return_value.__enter__ = MagicMock(return_value=mock_ydl)
+            mock_ydl.return_value.__exit__ = MagicMock(return_value=False)
+            mock_ydl.extract_info = MagicMock(return_value=info)
+            path, _ = scraper.download_track_audio(
+                "q", dest_base + ".mp3", audio_format="original"
+            )
+        assert path == str(opus_path)
+
+    def test_final_path_glob_when_info_none(self, tmp_path):
+        from Spotify_Downloader import MusicScraper
+
+        scraper = MusicScraper()
+        dest_base = str(tmp_path / "Song")
+        opus_path = tmp_path / "Song.opus"
+        url = "https://www.youtube.com/watch?v=abc"
+
+        def write_opus(*_args, **_kwargs):
+            opus_path.write_bytes(b"opus")
+            return None
+
+        with (
+            patch("Spotify_Downloader.get_ffmpeg_path", return_value="/usr/bin"),
+            patch.object(scraper, "_select_youtube_match", return_value=url),
+            patch("Spotify_Downloader.YoutubeDL") as mock_ydl,
+        ):
+            mock_ydl.return_value.__enter__ = MagicMock(return_value=mock_ydl)
+            mock_ydl.return_value.__exit__ = MagicMock(return_value=False)
+            mock_ydl.extract_info = MagicMock(side_effect=write_opus)
+            path, _ = scraper.download_track_audio(
+                "q", dest_base + ".mp3", audio_format="original"
+            )
+        assert path == str(opus_path)
+
+    def test_stale_file_with_failed_attempt_raises(self, tmp_path):
+        from Spotify_Downloader import MusicScraper
+
+        scraper = MusicScraper()
+        dest_base = str(tmp_path / "Song")
+        stale = tmp_path / "Song.opus"
+        stale.write_bytes(b"stale")
+        url = "https://www.youtube.com/watch?v=abc"
+        with (
+            patch("Spotify_Downloader.get_ffmpeg_path", return_value="/usr/bin"),
+            patch.object(scraper, "_select_youtube_match", return_value=url),
+            patch("Spotify_Downloader.YoutubeDL") as mock_ydl,
+        ):
+            mock_ydl.return_value.__enter__ = MagicMock(return_value=mock_ydl)
+            mock_ydl.return_value.__exit__ = MagicMock(return_value=False)
+            mock_ydl.extract_info = MagicMock(return_value=None)
+            with pytest.raises(RuntimeError, match="no playable audio source"):
+                scraper.download_track_audio("q", dest_base + ".mp3", audio_format="original")
+        assert stale.exists()
+
+    def test_glob_ignores_temp_and_nonaudio(self, tmp_path):
+        from Spotify_Downloader import _resolve_passthrough_download
+
+        base = str(tmp_path / "Song")
+        (tmp_path / "Song.opus.part").write_bytes(b"x")
+        (tmp_path / "Song.temp.m4a").write_bytes(b"x")
+        (tmp_path / "Song.jpg").write_bytes(b"x")
+        m4a = tmp_path / "Song.m4a"
+        m4a.write_bytes(b"audio")
+        assert _resolve_passthrough_download(base, None, set()) == str(m4a)
+
+    def test_glob_excludes_stale_lossless_files(self, tmp_path):
+        from Spotify_Downloader import _resolve_passthrough_download
+
+        base = str(tmp_path / "Song")
+        (tmp_path / "Song.flac").write_bytes(b"flac")
+        (tmp_path / "Song.wav").write_bytes(b"wav")
+        assert _resolve_passthrough_download(base, None, set()) is None
+
+    def test_glob_excludes_preexisting_candidates(self, tmp_path):
+        from Spotify_Downloader import _resolve_passthrough_download
+
+        base = str(tmp_path / "Song")
+        m4a = tmp_path / "Song.m4a"
+        m4a.write_bytes(b"audio")
+        m4a_str = str(m4a)
+        assert _resolve_passthrough_download(base, None, {m4a_str}) is None
+        assert _resolve_passthrough_download(base, None, set()) == m4a_str
+
+    def test_glob_handles_bracket_filenames(self, tmp_path):
+        from Spotify_Downloader import _resolve_passthrough_download
+
+        base = str(tmp_path / "Song [abc123]")
+        opus = tmp_path / "Song [abc123].opus"
+        opus.write_bytes(b"opus")
+        assert _resolve_passthrough_download(base, None, set()) == str(opus)
+
+    def test_size_cap_applies_to_resolved_path(self, tmp_path):
+        from Spotify_Downloader import MusicScraper
+
+        scraper = MusicScraper(max_track_mb=10)
+        dest_base = str(tmp_path / "Song")
+        opus_path = tmp_path / "Song.opus"
+        opus_path.write_bytes(b"x" * (20 * 1024 * 1024))
+        url = "https://www.youtube.com/watch?v=huge"
+        raised = None
+        with (
+            patch("Spotify_Downloader.get_ffmpeg_path", return_value="/usr/bin"),
+            patch.object(scraper, "_select_youtube_match", return_value=url),
+            patch("Spotify_Downloader.YoutubeDL") as mock_ydl,
+        ):
+            mock_ydl.return_value.__enter__ = MagicMock(return_value=mock_ydl)
+            mock_ydl.return_value.__exit__ = MagicMock(return_value=False)
+            mock_ydl.extract_info = MagicMock(
+                return_value={"requested_downloads": [{"filepath": str(opus_path)}]}
+            )
+            try:
+                scraper.download_track_audio(
+                    "q", dest_base + ".mp3", audio_format="original"
+                )
+            except RuntimeError as exc:
+                raised = str(exc)
+        assert raised is not None and "size limit" in raised
+        assert not opus_path.exists()
+
+    def test_no_file_raises_no_playable(self, tmp_path):
+        from Spotify_Downloader import MusicScraper
+
+        scraper = MusicScraper()
+        dest_base = str(tmp_path / "Song")
+        url = "https://www.youtube.com/watch?v=missing"
+        with (
+            patch("Spotify_Downloader.get_ffmpeg_path", return_value="/usr/bin"),
+            patch.object(scraper, "_select_youtube_match", return_value=url),
+            patch("Spotify_Downloader.YoutubeDL") as mock_ydl,
+        ):
+            mock_ydl.return_value.__enter__ = MagicMock(return_value=mock_ydl)
+            mock_ydl.return_value.__exit__ = MagicMock(return_value=False)
+            mock_ydl.extract_info = MagicMock(return_value=None)
+            with pytest.raises(RuntimeError, match="no playable audio source"):
+                scraper.download_track_audio("q", dest_base + ".mp3", audio_format="original")
+
+
+class TestConfigOriginalFormat:
+    def test_original_round_trips_for_youtube(self, tmp_path, monkeypatch):
+        import json
+
+        from Spotify_Downloader import load_config
+
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"format": "original", "download_source": "youtube"}))
+        monkeypatch.setattr("Spotify_Downloader._config_path", lambda: str(cfg))
+        assert load_config()["format"] == "original"
+
+    def test_original_coerced_for_librespot(self, tmp_path, monkeypatch):
+        import json
+
+        from Spotify_Downloader import load_config
+
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"format": "original", "download_source": "librespot"}))
+        monkeypatch.setattr("Spotify_Downloader._config_path", lambda: str(cfg))
+        assert load_config()["format"] == "ogg"
 
 
 class TestYoutubeMatchSelection:

@@ -6,7 +6,8 @@ Tidal prepended when the user configured an instance); the first that yields a
 **validated, genuinely-lossless** ``.flac`` wins. If every lossless service
 fails, it falls through to the YouTube backend so the track still downloads —
 labelled honestly as non-lossless, and lossless containers (``flac``/``wav``)
-are remapped to MP3 320k so the file matches its lossy source (goal §3, §9, §13).
+are remapped to ``original`` so the file keeps YouTube's native lossy codec
+(goal §3, §9, §13).
 
 Honesty is enforced at the byte level: a file is only kept as ``.flac`` when its
 bytes actually start with the ``fLaC`` magic. We never transcode a lossy stream

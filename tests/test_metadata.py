@@ -463,3 +463,68 @@ class TestMp3M4aParity:
         assert a["discnumber"] == ["2"]
         _write_metadata_mp3(path, {"title": "t", "artists": "a", "album": ""}, None)
         assert EasyID3(path)["album"] == ["Al"]  # not erased
+
+
+class TestOpusWriter:
+    def _opus(self, tmp_path):
+        import shutil
+        import subprocess
+
+        ff = shutil.which("ffmpeg")
+        if not ff:
+            pytest.skip("ffmpeg not available")
+        enc = subprocess.run(
+            [ff, "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if "libopus" not in enc.stdout:
+            pytest.skip("ffmpeg libopus encoder not available")
+        path = str(tmp_path / "t.opus")
+        subprocess.run(
+            [
+                ff,
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=1",
+                "-c:a",
+                "libopus",
+                "-y",
+                path,
+            ],
+            capture_output=True,
+            check=True,
+        )
+        return path
+
+    def test_writes_tags_and_cover_never_erases(self, tmp_path):
+        from mutagen.oggopus import OggOpus
+
+        from Spotify_Downloader import _write_metadata_opus
+
+        path = self._opus(tmp_path)
+        cover = b"\xff\xd8fakejpeg"
+        _write_metadata_opus(
+            path,
+            {
+                "title": "Alone",
+                "artists": "Jan Blomqvist",
+                "album": "Alone",
+                "trackNumber": 1,
+            },
+            cover,
+        )
+        a = OggOpus(path)
+        assert a["title"] == ["Alone"]
+        assert a["album"] == ["Alone"]
+        assert a["tracknumber"] == ["1"]
+        assert a["metadata_block_picture"]
+        _write_metadata_opus(path, {"title": "Alone", "artists": "X", "album": ""}, None)
+        assert OggOpus(path)["album"] == ["Alone"]
+
+    def test_writer_registered_for_opus(self):
+        from Spotify_Downloader import _METADATA_WRITERS, _write_metadata_opus
+
+        assert _METADATA_WRITERS[".opus"] is _write_metadata_opus

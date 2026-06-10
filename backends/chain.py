@@ -80,7 +80,7 @@ class FallbackChainBackend:
             step_fmt, step_q = audio_format, audio_quality
             if i > 0:
                 if source_name == "youtube":
-                    step_fmt, step_q = "mp3", "320"
+                    step_fmt = "original"
                 elif source_name == "librespot":
                     step_fmt, step_q = "ogg", "320"
             step_has_fallback = i < n - 1
@@ -160,10 +160,13 @@ class FallbackChainBackend:
                 else:
                     msg = (
                         "Lossless source unavailable — fell back to YouTube "
-                        "(MP3 320k, not lossless)"
+                        "(lossy source quality, not lossless)"
                     )
             else:
-                msg = "Lossless source unavailable — fell back to YouTube (MP3 320k, not lossless)"
+                msg = (
+                    "Lossless source unavailable — fell back to YouTube "
+                    "(lossy source quality, not lossless)"
+                )
         else:
             msg = f"{exc}; falling back to YouTube"
         self._emit(msg)

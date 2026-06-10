@@ -76,7 +76,7 @@ def test_librespot_source_pins_ogg(win):
     _select_source(panel, "librespot")
     assert _format_items(panel) == ["ogg"]
     assert not panel._format_cb.isEnabled()
-    assert not panel._quality_cb.isEnabled()  # native ~320k; fallback pinned to MP3 320
+    assert not panel._quality_cb.isEnabled()  # native ~320k; fallback keeps source codec
     assert not panel._lossless_quality_cb.isEnabled()
     assert win._config["format"] == "ogg"
     assert not panel._format_lbl.isEnabled()
@@ -93,3 +93,17 @@ def test_switching_back_to_youtube_restores_lossy_default(win):
     assert panel._format_cb.isEnabled()
     assert panel._quality_cb.isEnabled()
     assert not panel._lossless_quality_cb.isEnabled()
+
+
+def test_youtube_offers_original_and_disables_quality(win):
+    panel = win.settings_panel
+    assert "original" in _format_items(panel)
+    idx = panel._format_cb.findText("original")
+    panel._format_cb.setCurrentIndex(idx)
+    assert not panel._quality_cb.isEnabled()
+    assert not panel._quality_lbl.isEnabled()
+    assert win._config["format"] == "original"
+    idx = panel._format_cb.findText("mp3")
+    panel._format_cb.setCurrentIndex(idx)
+    assert panel._quality_cb.isEnabled()
+    assert panel._quality_lbl.isEnabled()

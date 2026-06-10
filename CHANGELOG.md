@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Original (no re-encode) audio format** — YouTube downloads can keep the
+  source codec (`.opus`, `.m4a`, etc.) instead of transcoding; fallback-chain
+  YouTube steps use the same passthrough path. `.opus` files are now tagged.
 - **If unavailable, try** — a single ordered fallback chain in the Output settings
   card replaces the per-source YouTube fallback checkboxes. Choose what happens
   when the primary source cannot serve a track (e.g. lossless → Spotify →
@@ -34,11 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   OUTPUT card next to the other format/quality settings; it is greyed out
   unless the Real FLAC source is selected. The bitrate selector is likewise
   greyed out for sources that ignore it (Real FLAC and Spotify/librespot).
-- A Spotify (librespot) track that falls back to YouTube now downloads as
-  MP3 320k — labelled as such in the status line — instead of re-encoding
-  YouTube's lossy stream to Ogg Vorbis (a pointless extra lossy generation
-  that also failed on ffmpeg builds without `libvorbis`), mirroring the Real
-  FLAC fallback behavior.
+- YouTube fallback steps (librespot and Real FLAC) now keep the source lossy
+  codec via the ``original`` format — no re-encode anywhere — instead of
+  pinning to MP3 320k or transcoding to Ogg Vorbis.
 - Librespot users who had the extended-mix YouTube toggle **off** now divert
   extended-mix soft misses to YouTube by default: migrated configs get
   `fallback_order: ["youtube"]`, and the chain decides extended-mix semantics.

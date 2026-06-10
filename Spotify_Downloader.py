@@ -23,6 +23,7 @@ __version__ = "2.1.0"
 
 import concurrent.futures
 import contextlib
+import glob
 import os
 import re
 import shutil
@@ -141,7 +142,9 @@ def get_ffmpeg_path():
 # Supported output formats. "lossy" means quality/bitrate applies; "lossless"
 # means the ffmpeg postprocessor ignores preferredquality. "codec" (optional) is
 # the yt-dlp FFmpegExtractAudio preferredcodec when it differs from the key
-# (yt-dlp names Ogg Vorbis "vorbis", not "ogg").
+# (yt-dlp names Ogg Vorbis "vorbis", not "ogg"). "ext" may be None for
+# passthrough formats (see "passthrough"): the final container is decided after
+# download, so never concatenate ext into a path for those.
 #
 # "ogg" exists primarily for the librespot backend, whose native ~320k OGG is
 # already the FINAL file and never touches the yt-dlp transcode/quality path. If
@@ -154,7 +157,11 @@ SUPPORTED_FORMATS = {
     "flac": {"ext": "flac", "lossy": False},
     "wav": {"ext": "wav", "lossy": False},
     "ogg": {"ext": "ogg", "lossy": True, "codec": "vorbis"},
+    "original": {"ext": None, "lossy": False, "passthrough": True},
 }
+# Extensions the YouTube passthrough (preferredcodec="best") pipeline can emit;
+# webm is a PP-failure remnant.
+PASSTHROUGH_AUDIO_EXTS = ("mp3", "m4a", "opus", "ogg", "aac", "webm")
 SUPPORTED_QUALITIES = ("128", "192", "256", "320")
 
 # Formats offered per download source (first entry = default when switching).
@@ -163,10 +170,11 @@ SUPPORTED_QUALITIES = ("128", "192", "256", "320")
 # without adding quality (fake lossless). The lossless and librespot backends
 # ignore the format setting on their native paths (always .flac / .ogg), so
 # their dropdowns pin to that single honest value; both backends remap their
-# YouTube fallbacks to MP3 320k, labelled as such. flac/wav stay in
-# SUPPORTED_FORMATS only for download_audio's transcode machinery.
+# YouTube fallbacks to "original" (no re-encode — keeps YouTube's native codec).
+# flac/wav stay in SUPPORTED_FORMATS only for download_audio's transcode
+# machinery.
 SOURCE_FORMATS = {
-    "youtube": ("mp3", "m4a", "opus", "ogg"),
+    "youtube": ("mp3", "m4a", "opus", "ogg", "original"),
     "lossless": ("flac",),
     "librespot": ("ogg",),
 }
@@ -459,6 +467,44 @@ def _snapshot_cookiefile(src: str) -> str:
             os.remove(dst)
         raise
     return dst
+
+
+def _passthrough_candidates(base):
+    """Allowlisted base.* audio files currently on disk (snapshot set).
+
+    Used before each yt-dlp attempt so the glob backstop can ignore stale
+    same-base files left by earlier runs. Mtime filtering cannot distinguish
+    fresh output (FFmpegExtractAudio back-dates mtimes to the source video
+    timestamp); deleting pre-existing files is forbidden (they belong to the
+    user). Set-difference works because yt-dlp never silently overwrites a
+    same-name output — it skips and reports the path via the info dict instead.
+    """
+    return {
+        p
+        for p in glob.glob(glob.escape(base) + ".*")
+        if os.path.splitext(p)[0] == base
+        and os.path.splitext(p)[1].lstrip(".").lower() in PASSTHROUGH_AUDIO_EXTS
+    }
+
+
+def _resolve_passthrough_download(base, info, preexisting):
+    """Final file for a preferredcodec='best' download: trust yt-dlp's post-PP
+    filepath, else glob base.* for a known audio extension (file on disk is the
+    single source of truth — ignoreerrors can leave info=None on success paths).
+    *preexisting* is the snapshot of allowlisted base.* files taken before the
+    yt-dlp attempt; the glob branch ignores those so stale files are not mistaken
+    for output of a failed attempt."""
+    if isinstance(info, dict):
+        for d in (info.get("requested_downloads") or [])[:1]:
+            p = d.get("filepath")
+            if p and os.path.exists(p):
+                return p
+    matches = [p for p in _passthrough_candidates(base) if p not in preexisting]
+    if not matches:
+        return None
+    # PP back-dates output mtimes to the source video's timestamp; mtime is only
+    # a tiebreaker when multiple real audio files exist for the same base.
+    return max(matches, key=os.path.getmtime)
 
 
 class MusicScraper(QThread):
@@ -831,7 +877,8 @@ class MusicScraper(QThread):
 
         Returns ``(path, used_extended)`` where *used_extended* is True when the
         strict extended-mix search leg produced the file, False when a normal /
-        fallback query did.
+        fallback query did. For the ``original`` format the returned path's
+        extension is the real downloaded container (opus, m4a, etc.).
 
         *audio_format* and *audio_quality* override the scraper's instance
         attributes for this call (used by backend delegations).
@@ -846,14 +893,15 @@ class MusicScraper(QThread):
 
         requested = audio_format if audio_format is not None else self.audio_format
         fmt = requested if requested in SUPPORTED_FORMATS else "mp3"
-        ext = SUPPORTED_FORMATS[fmt]["ext"]
-        is_lossy = SUPPORTED_FORMATS[fmt]["lossy"]
+        fmt_info = SUPPORTED_FORMATS[fmt]
+        passthrough = fmt_info.get("passthrough", False)
+        is_lossy = fmt_info["lossy"]
 
         base, _ = os.path.splitext(destination)
         output_template = base + ".%(ext)s"
         postprocessor = {
             "key": "FFmpegExtractAudio",
-            "preferredcodec": SUPPORTED_FORMATS[fmt].get("codec", fmt),
+            "preferredcodec": "best" if passthrough else fmt_info.get("codec", fmt),
         }
         if is_lossy:
             postprocessor["preferredquality"] = (
@@ -893,7 +941,7 @@ class MusicScraper(QThread):
             else:
                 self._warn_cookies_ignored(problem)
 
-        expected_path = base + "." + ext
+        expected_path = None if passthrough else base + "." + fmt_info["ext"]
 
         try:
             # Primary query (widened to 5 results), then a simplified fallback if
@@ -911,27 +959,32 @@ class MusicScraper(QThread):
                     continue
                 info = None
                 try:
+                    preexisting = _passthrough_candidates(base) if passthrough else None
                     with YoutubeDL(ydl_opts) as ydl:
                         info = ydl.extract_info(video_url, download=True)
                 except Exception:
                     # Availability/network errors are absorbed by ignoreerrors; the
                     # file-exists check below is the single source of truth.
                     pass
-                if os.path.exists(expected_path):
+                if passthrough:
+                    final_path = _resolve_passthrough_download(base, info, preexisting)
+                else:
+                    final_path = expected_path if os.path.exists(expected_path) else None
+                if final_path:
                     # Enforce the optional max file-size cap on the FINAL file. A
                     # too-large file is the wrong-version signal (e.g. an hour-long
                     # mix), so discard it and try the next candidate/fallback.
                     if (
                         self.max_track_bytes
-                        and os.path.getsize(expected_path) > self.max_track_bytes
+                        and os.path.getsize(final_path) > self.max_track_bytes
                     ):
                         too_big = True
                         with contextlib.suppress(OSError):
-                            os.remove(expected_path)
+                            os.remove(final_path)
                         continue
                     if cookie_tmp:
                         self._report_premium_status(info)
-                    return expected_path, pe
+                    return final_path, pe
 
             if too_big:
                 raise RuntimeError(
@@ -995,8 +1048,9 @@ class MusicScraper(QThread):
         # extended mode but fell back to the original -> drop the (Extended Mix) marker.
         # Build the unmarked name via _format_track_filename so it honors artist_first.
         # _format_track_filename always yields ".mp3"; preserve the real container of
-        # the downloaded file (e.g. ".ogg" from librespot, ".flac" from YouTube) so the
-        # rename doesn't mislabel the file and break the extension-keyed tag writer.
+        # the downloaded file (e.g. ".opus" from a YouTube original download,
+        # ".flac" from Real FLAC) so the rename doesn't mislabel the file and break
+        # the extension-keyed tag writer.
         real_ext = os.path.splitext(final_path)[1]
 
         def _with_real_ext(name: str) -> str:
@@ -1817,21 +1871,13 @@ def _write_metadata_flac(filename: str, tags: dict, cover_bytes: bytes | None) -
     audio.save()
 
 
-def _write_metadata_ogg(filename: str, tags: dict, cover_bytes: bytes | None) -> None:
-    """Write Vorbis comments + embedded cover art to an Ogg Vorbis file.
-
-    Used by the librespot backend's native ~320k .ogg output. Ogg Vorbis carries
-    cover art as a base64-encoded FLAC ``METADATA_BLOCK_PICTURE`` inside a Vorbis
-    comment (there is no APIC frame like ID3), so the picture is built with
-    mutagen's FLAC Picture and base64-embedded.
-    """
+def _write_metadata_vorbis_comments(audio, tags: dict, cover_bytes: bytes | None) -> None:
+    """Write Vorbis comments + embedded cover art (Ogg Vorbis / Opus)."""
     import base64
 
     from mutagen.flac import Picture
     from mutagen.id3 import PictureType
-    from mutagen.oggvorbis import OggVorbis
 
-    audio = OggVorbis(filename)
     audio["title"] = tags.get("title", "")
     audio["artist"] = tags.get("artists", "")
     album = tags.get("album", "")
@@ -1857,6 +1903,23 @@ def _write_metadata_ogg(filename: str, tags: dict, cover_bytes: bytes | None) ->
         pic.desc = "Cover"
         pic.data = cover_bytes
         audio["metadata_block_picture"] = [base64.b64encode(pic.write()).decode("ascii")]
+
+
+def _write_metadata_ogg(filename: str, tags: dict, cover_bytes: bytes | None) -> None:
+    """Write Vorbis comments + embedded cover art to an Ogg Vorbis file."""
+    from mutagen.oggvorbis import OggVorbis
+
+    audio = OggVorbis(filename)
+    _write_metadata_vorbis_comments(audio, tags, cover_bytes)
+    audio.save()
+
+
+def _write_metadata_opus(filename: str, tags: dict, cover_bytes: bytes | None) -> None:
+    """Write Vorbis comments + embedded cover art to an Opus file."""
+    from mutagen.oggopus import OggOpus
+
+    audio = OggOpus(filename)
+    _write_metadata_vorbis_comments(audio, tags, cover_bytes)
     audio.save()
 
 
@@ -1865,6 +1928,7 @@ _METADATA_WRITERS = {
     ".m4a": _write_metadata_m4a,
     ".flac": _write_metadata_flac,
     ".ogg": _write_metadata_ogg,
+    ".opus": _write_metadata_opus,
 }
 
 
@@ -1880,9 +1944,8 @@ class WritingMetaTagsThread(QThread):
         """Write tags + cover art synchronously, dispatching on file extension.
 
         Each container uses a different tag system (ID3 for mp3, iTunes atoms
-        for m4a, Vorbis comments for flac). Opus/WAV are skipped with a log
-        line; those formats have limited or no standard cover-art story that
-        would repay the extra dependency surface for this project's scope.
+        for m4a, Vorbis comments for flac/ogg/opus). WAV/unknown containers are
+        skipped with a log line.
         """
         try:
             print("[*] FileName : ", self.filename)
@@ -2265,9 +2328,9 @@ class SettingsPanel(QWidget):
 
     def _sync_quality_enabled(self):
         """Bitrate applies only to the YouTube transcode path with a lossy
-        format. The lossless (.flac) and librespot (~320k .ogg) sources ignore
-        it: their native streams are fixed-quality and their YouTube fallbacks
-        are pinned to MP3 320k."""
+        format. Passthrough (``original``) has no bitrate. The lossless (.flac)
+        and librespot (~320k .ogg) sources ignore it: their native streams are
+        fixed-quality and their YouTube fallbacks keep the source codec."""
         fmt = self._format_cb.currentText()
         is_lossy = SUPPORTED_FORMATS.get(fmt, {}).get("lossy", True)
         on = self._current_source() == "youtube" and is_lossy

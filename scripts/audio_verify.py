@@ -28,7 +28,7 @@ import re
 import subprocess
 import sys
 
-AUDIO_EXT = {".flac", ".ogg", ".mp3", ".m4a", ".opus", ".wav"}
+AUDIO_EXT = {".flac", ".ogg", ".mp3", ".m4a", ".opus", ".wav", ".webm"}
 
 
 def ffprobe(path):
