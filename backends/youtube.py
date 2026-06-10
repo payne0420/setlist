@@ -39,6 +39,7 @@ class YouTubeBackend:
                 destination,
                 expected_duration_s=expected_dur,
                 fallback_query=normal_query,
+                source_title=track_title,
             )
         else:
             path, used = s.download_track_audio(

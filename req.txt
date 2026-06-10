@@ -4,6 +4,10 @@ PyQt5>=5.15.9
 requests>=2.32.2
 yt-dlp>=2024.8.6
 
+# lossless (Real FLAC) backend: RFC-6238 TOTP for the Spotify ISRC flow +
+# AES-GCM for the Qobuz MusicDL / Amazon proxy debug keys
+pyotp>=2.9.0
+cryptography>=42.0.0
 # Opt-in librespot backend (Spotify native ~320k OGG). Alpha library, PINNED to a
 # known-good commit and contained behind backends/librespot/_librespot/ so an upstream
 # break degrades to YouTube rather than bricking Setlist. Pure Python — no Rust

@@ -100,9 +100,24 @@ a = Analysis(
         'mutagen.easyid3',
         'mutagen.flac',
         'mutagen.mp4',
-        'mutagen.oggvorbis',  # librespot OGG tag writer
+        'mutagen.oggvorbis',
         'yt_dlp',
         'requests',
+        # Lossless (Real FLAC) backend deps. The backend + its service clients
+        # are imported lazily (string imports inside make_backend / RealFlacBackend),
+        # so PyInstaller can't see them by static analysis — list them explicitly.
+        'pyotp',
+        'cryptography',
+        'cryptography.hazmat.primitives.ciphers.aead',
+        'backends.real_flac',
+        'lossless',
+        'lossless.constants',
+        'lossless.spotify_isrc',
+        'lossless.qobuz',
+        'lossless.bridge',
+        'lossless.amazon',
+        'lossless.tidal',
+        'lossless.validate',
         # librespot backend third-party deps (lazy/dynamic imports PyInstaller can miss)
         'Cryptodome',
         'google.protobuf',

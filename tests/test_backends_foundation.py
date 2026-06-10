@@ -142,6 +142,45 @@ class TestSelectorParity:
         ]
         assert track_selectors.select_extended(cands, None, 1200) == "b"
 
+    def test_title_matches_same_song_through_qualifiers(self):
+        # Accent-folded, qualifier-stripped token overlap accepts the same song.
+        assert track_selectors.title_matches("More - Zerb Remix", "More (Zerb Extended Remix)")
+        assert track_selectors.title_matches(
+            "Canopée des Cîmes", "Canopee des Cimes (Extended Mix)"
+        )
+        # An empty source can't be judged, so it accepts (preserves old behavior).
+        assert track_selectors.title_matches("", "Anything (Extended Mix)")
+
+    def test_title_matches_rejects_different_song(self):
+        # The real bug: a "Teardrop"/"Maybe Not" search drifting to another track.
+        assert not track_selectors.title_matches(
+            "Teardrop", "Maybe Not (Rodriguez Jr. Extended Remix)"
+        )
+        assert not track_selectors.title_matches(
+            "Maybe Not", "Our Broken Mind Embassy (Extended Mix)"
+        )
+
+    def test_strict_title_rejects_wrong_song_extended_cut(self):
+        # Without the guard the longer keyworded cut wins; with strict_title it is
+        # discarded as a different song, so the selector falls back (None).
+        cands = [{"id": "x", "title": "Our Broken Mind Embassy (Extended Mix)", "duration_s": 470}]
+        assert track_selectors.select_extended(cands, 200, 1200) == "x"
+        assert (
+            track_selectors.select_extended(
+                cands, 200, 1200, source_title="Maybe Not", strict_title=True
+            )
+            is None
+        )
+
+    def test_strict_title_keeps_matching_extended_cut(self):
+        cands = [{"id": "x", "title": "Maybe Not (Extended Mix)", "duration_s": 470}]
+        assert (
+            track_selectors.select_extended(
+                cands, 200, 1200, source_title="Maybe Not", strict_title=True
+            )
+            == "x"
+        )
+
     def test_strip_radio_edit_leaves_unrelated_words(self):
         assert track_selectors.strip_radio_edit("Radio Ga Ga") == "Radio Ga Ga"
         assert track_selectors.strip_radio_edit("Song (Radio Edit)") == "Song"

@@ -98,6 +98,9 @@ class TrackInfo:
     duration_ms: int | None
     preview_url: str | None
     raw: dict[str, object]
+    # Populated lazily by the lossless backend only (the embed API has no ISRC).
+    # Defaulted so the YouTube path and existing construction sites are unaffected.
+    isrc: str | None = None
 
     @property
     def spotify_id(self) -> str:
