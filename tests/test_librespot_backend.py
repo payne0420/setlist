@@ -25,12 +25,14 @@ import requests
 
 import Spotify_Downloader as sd
 from backends import KNOWN_DOWNLOAD_SOURCES, make_backend
+from backends.chain import FallbackChainBackend
 from backends.librespot import _librespot as adapter
 from backends.librespot import audio, search, track_metadata, webapi
 from backends.librespot.backend import LibrespotBackend
 from backends.librespot.errors import (
     LibrespotCancelled,
     LibrespotNotPremium,
+    NoExtendedCutError,
     OggCaptureError,
 )
 from backends.librespot.metadata_service import LibrespotMetadataService
@@ -119,11 +121,10 @@ def _track(title="Song", artists="Artist", duration_ms=200000, tid="base62id"):
     return SimpleNamespace(title=title, artists=artists, duration_ms=duration_ms, id=tid)
 
 
-def _fake_scraper(max_extended_minutes=20, extended_yt_fallback=False):
+def _fake_scraper(max_extended_minutes=20):
     return SimpleNamespace(
         max_track_duration_s=max_extended_minutes * 60,
         spotify_credentials_path="",
-        librespot_extended_yt_fallback=extended_yt_fallback,
         error_signal=SimpleNamespace(emit=lambda *_a, **_k: None),
     )
 
@@ -514,8 +515,8 @@ class TestBackendFetch:
         assert path.endswith(".ogg")
         assert ext == "ogg"
 
-    def test_known_free_account_raises_when_fallback_disabled(self, tmp_path, monkeypatch):
-        be = self._backend(monkeypatch, product="free", allow_youtube_fallback=False)
+    def test_known_free_account_raises_not_premium(self, tmp_path, monkeypatch):
+        be = self._backend(monkeypatch, product="free")
         with pytest.raises(LibrespotNotPremium):
             be.fetch(
                 track=_track(),
@@ -539,10 +540,6 @@ class TestBackendFetch:
             return dest
 
         monkeypatch.setattr(audio, "fetch_track_ogg", fake_fetch_ogg)
-        monkeypatch.setattr(
-            "backends.librespot.backend.YouTubeBackend",
-            lambda *_a, **_k: pytest.fail("must not fall back to YouTube when product unknown"),
-        )
         path, ext, used = be.fetch(
             track=_track(),
             destination=str(tmp_path / "s.mp3"),
@@ -552,58 +549,6 @@ class TestBackendFetch:
             cancel=_no_cancel,
         )
         assert ext == "ogg" and captured.get("called")
-
-    def test_free_account_falls_back_to_youtube(self, tmp_path, monkeypatch):
-        be = self._backend(monkeypatch, product="free")  # fallback enabled (default)
-        calls = {}
-
-        class FakeYouTube:
-            def __init__(self, scraper):
-                calls["constructed"] = True
-
-            def fetch(self, **kw):
-                calls["fetched"] = kw
-                return ("/tmp/fallback.mp3", "mp3", kw["extended"])
-
-        monkeypatch.setattr("backends.librespot.backend.YouTubeBackend", FakeYouTube)
-        path, ext, used = be.fetch(
-            track=_track(),
-            destination=str(tmp_path / "s.mp3"),
-            extended=False,
-            audio_format="mp3",
-            audio_quality="192",
-            cancel=_no_cancel,
-        )
-        assert ext == "mp3"  # YouTube fallback, not native ogg
-        assert calls.get("fetched")
-
-    def test_fallback_remaps_ogg_to_mp3_320(self, tmp_path, monkeypatch):
-        # The UI pins this source's format to its native "ogg"; the YouTube
-        # fallback must not transcode YouTube's lossy stream to Vorbis (an
-        # extra lossy generation, and ffmpeg builds without libvorbis fail).
-        # It mirrors the Real FLAC fallback: MP3 320k.
-        be = self._backend(monkeypatch, product="free")
-        calls = {}
-
-        class FakeYouTube:
-            def __init__(self, scraper):
-                pass
-
-            def fetch(self, **kw):
-                calls["fetched"] = kw
-                return ("/tmp/fallback.mp3", "mp3", kw["extended"])
-
-        monkeypatch.setattr("backends.librespot.backend.YouTubeBackend", FakeYouTube)
-        be.fetch(
-            track=_track(),
-            destination=str(tmp_path / "s.mp3"),
-            extended=False,
-            audio_format="ogg",
-            audio_quality="192",
-            cancel=_no_cancel,
-        )
-        assert calls["fetched"]["audio_format"] == "mp3"
-        assert calls["fetched"]["audio_quality"] == "320"
 
     def test_extended_streams_searched_id(self, tmp_path, monkeypatch):
         be = self._backend(monkeypatch, product="premium")
@@ -651,55 +596,57 @@ class TestBackendFetch:
         assert captured["base62"] == "orig"  # fell back to the original id
         assert used is False  # NOT mislabeled as extended
 
-    def test_extended_no_match_with_yt_fallback_uses_youtube(self, tmp_path, monkeypatch):
-        # Toggle ON: no extended cut on Spotify -> delegate to YouTube's extended search
-        # (NOT the original Spotify track, and NOT a native capture).
-        be = self._backend(
-            monkeypatch, product="premium", scraper=_fake_scraper(extended_yt_fallback=True)
-        )
+    def test_extended_no_match_with_has_fallback_raises(self, tmp_path, monkeypatch):
+        be = self._backend(monkeypatch, product="premium")
         monkeypatch.setattr(search, "find_extended_id", lambda *_a, **_k: None)
         monkeypatch.setattr(
             audio,
             "fetch_track_ogg",
-            lambda *_a, **_k: pytest.fail("must not capture native when falling back to YouTube"),
+            lambda *_a, **_k: pytest.fail("must not capture native when chain will advance"),
         )
-        calls = {}
+        with pytest.raises(NoExtendedCutError):
+            be.fetch(
+                track=_track(),
+                destination=str(tmp_path / "s.mp3"),
+                extended=True,
+                audio_format="mp3",
+                audio_quality="192",
+                cancel=_no_cancel,
+                has_fallback=True,
+            )
 
-        class FakeYouTube:
-            def __init__(self, scraper):
-                pass
+    def test_extended_no_match_without_has_fallback_streams_original(self, tmp_path, monkeypatch):
+        be = self._backend(monkeypatch, product="premium")
+        monkeypatch.setattr(search, "find_extended_id", lambda *_a, **_k: None)
+        captured = {}
 
-            def fetch(self, **kw):
-                calls.update(kw)
-                return ("/tmp/x.mp3", "mp3", True)
+        def fake_fetch_ogg(session_raw, base62, *, dest, cancel, on_status=None, on_metadata=None):
+            captured["base62"] = base62
+            with open(dest, "wb") as f:
+                f.write(b"OggS")
+            return dest
 
-        monkeypatch.setattr("backends.librespot.backend.YouTubeBackend", FakeYouTube)
+        monkeypatch.setattr(audio, "fetch_track_ogg", fake_fetch_ogg)
         path, ext, used = be.fetch(
-            track=_track(),
+            track=_track(tid="orig"),
             destination=str(tmp_path / "s.mp3"),
             extended=True,
             audio_format="mp3",
             audio_quality="192",
             cancel=_no_cancel,
+            has_fallback=False,
         )
-        assert ext == "mp3"
-        assert calls.get("extended") is True  # YouTube runs its own extended search
+        assert captured["base62"] == "orig"
+        assert used is False
 
     def test_extended_search_failure_streams_original_not_youtube(self, tmp_path, monkeypatch):
-        # Toggle ON, but the Spotify search FAILS (e.g. 429). That's not "no extended
-        # cut" — must stream the original native track, NOT divert to YouTube.
-        be = self._backend(
-            monkeypatch, product="premium", scraper=_fake_scraper(extended_yt_fallback=True)
-        )
+        # Search FAILS (e.g. 429) — stream the original native track, NOT NoExtendedCutError.
+        be = self._backend(monkeypatch, product="premium")
 
         def boom(*_a, **_k):
             raise RuntimeError("API rate limit exceeded")
 
         monkeypatch.setattr(search, "find_extended_id", boom)
-        monkeypatch.setattr(
-            "backends.librespot.backend.YouTubeBackend",
-            lambda *_a, **_k: pytest.fail("must not divert to YouTube on a search failure"),
-        )
         captured = {}
 
         def fake_fetch_ogg(session_raw, base62, *, dest, cancel, on_status=None, on_metadata=None):
@@ -720,41 +667,6 @@ class TestBackendFetch:
         assert ext == "ogg"
         assert used is False
         assert captured["base62"] == "orig"  # streamed the original, native
-
-    def test_used_youtube_fallback_flag_tracks_provenance(self, tmp_path, monkeypatch):
-        # Native success -> flag False; a fallback -> flag True. The seam reads this to
-        # mark History reliably (independent of file extension).
-        def fake_fetch_ogg(session_raw, base62, *, dest, cancel, on_status=None, on_metadata=None):
-            with open(dest, "wb") as f:
-                f.write(b"OggS")
-            return dest
-
-        be = self._backend(monkeypatch, product="premium")
-        monkeypatch.setattr(audio, "fetch_track_ogg", fake_fetch_ogg)
-        be.fetch(
-            track=_track(),
-            destination=str(tmp_path / "a.mp3"),
-            extended=False,
-            audio_format="mp3",
-            audio_quality="192",
-            cancel=_no_cancel,
-        )
-        assert be.used_youtube_fallback is False
-
-        be2 = self._backend(monkeypatch, product="free")  # forces fallback
-        monkeypatch.setattr(
-            "backends.librespot.backend.YouTubeBackend",
-            lambda *_a, **_k: SimpleNamespace(fetch=lambda **_kw: ("/tmp/x.mp3", "mp3", False)),
-        )
-        be2.fetch(
-            track=_track(),
-            destination=str(tmp_path / "b.mp3"),
-            extended=False,
-            audio_format="mp3",
-            audio_quality="192",
-            cancel=_no_cancel,
-        )
-        assert be2.used_youtube_fallback is True
 
     def test_max_concurrency_is_one(self):
         assert LibrespotBackend.max_concurrency == 1
@@ -1171,7 +1083,7 @@ class TestRegistrationAndConfig:
                     "download_source": "librespot",
                     "spotify_credentials_path": "/tmp/creds.json",
                     "librespot_consented": True,
-                    "librespot_extended_yt_fallback": True,
+                    "fallback_order": ["youtube"],
                 }
             )
         )
@@ -1180,13 +1092,39 @@ class TestRegistrationAndConfig:
         assert loaded["download_source"] == "librespot"
         assert loaded["spotify_credentials_path"] == "/tmp/creds.json"
         assert loaded["librespot_consented"] is True
-        assert loaded["librespot_extended_yt_fallback"] is True
+        assert loaded["fallback_order"] == ["youtube"]
 
-    def test_extended_yt_fallback_defaults_off(self, tmp_path, monkeypatch):
+    def test_migrates_librespot_extended_toggle_to_chain(self, tmp_path, monkeypatch):
         cfg = tmp_path / "config.json"
-        cfg.write_text("{}")
+        cfg.write_text(
+            json.dumps(
+                {
+                    "download_source": "librespot",
+                    "librespot_extended_yt_fallback": False,
+                }
+            )
+        )
         monkeypatch.setattr(sd, "_config_path", lambda: str(cfg))
-        assert sd.load_config()["librespot_extended_yt_fallback"] is False
+        assert sd.load_config()["fallback_order"] == ["youtube"]
+
+    def test_migrates_lossless_youtube_fallback_off(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.json"
+        cfg.write_text(
+            json.dumps(
+                {
+                    "download_source": "lossless",
+                    "lossless_youtube_fallback": False,
+                }
+            )
+        )
+        monkeypatch.setattr(sd, "_config_path", lambda: str(cfg))
+        assert sd.load_config()["fallback_order"] == []
+
+    def test_migrates_lossless_youtube_fallback_on(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"download_source": "lossless"}))
+        monkeypatch.setattr(sd, "_config_path", lambda: str(cfg))
+        assert sd.load_config()["fallback_order"] == ["youtube"]
 
     def test_ogg_in_supported_formats_not_lossless(self):
         assert "ogg" in sd.SUPPORTED_FORMATS
@@ -1214,7 +1152,7 @@ class TestRegistrationAndConfig:
         with pytest.raises(LibrespotUnavailable):
             LibrespotSession("/tmp/none.json").connect_stored()
 
-    def test_backend_falls_back_to_youtube_when_adapter_unavailable(self, monkeypatch):
+    def test_backend_raises_when_adapter_unavailable(self, monkeypatch):
         from backends.librespot.errors import LibrespotUnavailable
 
         be = LibrespotBackend(_fake_scraper())
@@ -1223,22 +1161,40 @@ class TestRegistrationAndConfig:
             raise LibrespotUnavailable("librespot missing")
 
         monkeypatch.setattr(be, "_ensure_session", boom)
+        with pytest.raises(LibrespotUnavailable):
+            be.fetch(
+                track=_track(),
+                destination="/tmp/nonexistent_dir_xyz/s.mp3",
+                extended=False,
+                audio_format="mp3",
+                audio_quality="192",
+                cancel=_no_cancel,
+            )
+
+    def test_make_backend_librespot_chain_falls_back_when_unavailable(self, monkeypatch):
+        from backends.librespot.errors import LibrespotUnavailable
+
+        be = make_backend("librespot", scraper=_fake_scraper(), fallback_order=["youtube"])
+        assert isinstance(be, FallbackChainBackend)
+        lib = be._steps[0][1]
+
+        def boom():
+            raise LibrespotUnavailable("librespot missing")
+
+        monkeypatch.setattr(lib, "_ensure_session", boom)
+        yt = be._steps[1][1]
         calls = {}
 
-        class FakeYouTube:
-            def __init__(self, scraper):
-                pass
+        def fake_yt_fetch(**kw):
+            calls["fetched"] = True
+            return ("/tmp/fallback.mp3", "mp3", kw["extended"])
 
-            def fetch(self, **kw):
-                calls["fetched"] = True
-                return ("/tmp/fallback.mp3", "mp3", kw["extended"])
-
-        monkeypatch.setattr("backends.librespot.backend.YouTubeBackend", FakeYouTube)
+        monkeypatch.setattr(yt, "fetch", fake_yt_fetch)
         path, ext, used = be.fetch(
             track=_track(),
-            destination="/tmp/nonexistent_dir_xyz/s.mp3",
+            destination="/tmp/s.mp3",
             extended=False,
-            audio_format="mp3",
+            audio_format="ogg",
             audio_quality="192",
             cancel=_no_cancel,
         )
@@ -1363,7 +1319,7 @@ class TestExtractTrackMetadata:
 
 class TestBackendSurfacesMetadata:
     """The backend exposes the captured protobuf metadata on ``last_track_metadata``
-    (same single-slot pattern as ``used_youtube_fallback``; safe at concurrency 1)."""
+    (single-slot attr; the chain snapshots it per fetch under concurrency)."""
 
     def _backend(self, monkeypatch, *, product="premium"):
         be = LibrespotBackend(_fake_scraper())
@@ -1393,7 +1349,7 @@ class TestBackendSurfacesMetadata:
             "artists": "Rick Astley",
         }
 
-    def test_metadata_reset_each_fetch_and_none_on_youtube_fallback(self, tmp_path, monkeypatch):
+    def test_metadata_reset_each_fetch(self, tmp_path, monkeypatch):
         be = self._backend(monkeypatch, product="premium")
 
         def fake_fetch_ogg(session_raw, base62, *, dest, cancel, on_status=None, on_metadata=None):
@@ -1413,23 +1369,17 @@ class TestBackendSurfacesMetadata:
         )
         assert be.last_track_metadata == {"album": "A"}
 
-        # A subsequent fetch that falls back to YouTube must clear the stale metadata
-        # (YouTube has no protobuf) so the seam doesn't tag a YouTube file with the
-        # previous track's album.
-        be2 = self._backend(monkeypatch, product="free")  # forces YouTube fallback
-        monkeypatch.setattr(
-            "backends.librespot.backend.YouTubeBackend",
-            lambda *_a, **_k: SimpleNamespace(fetch=lambda **_kw: ("/tmp/x.mp3", "mp3", False)),
-        )
-        be2.last_track_metadata = {"album": "STALE"}  # pretend a prior native track set it
-        be2.fetch(
-            track=_track(),
-            destination=str(tmp_path / "b.mp3"),
-            extended=False,
-            audio_format="mp3",
-            audio_quality="192",
-            cancel=_no_cancel,
-        )
+        be2 = self._backend(monkeypatch, product="free")
+        be2.last_track_metadata = {"album": "STALE"}
+        with pytest.raises(LibrespotNotPremium):
+            be2.fetch(
+                track=_track(),
+                destination=str(tmp_path / "b.mp3"),
+                extended=False,
+                audio_format="mp3",
+                audio_quality="192",
+                cancel=_no_cancel,
+            )
         assert be2.last_track_metadata is None
 
     def test_fetch_track_ogg_invokes_on_metadata_with_extracted_dict(self, tmp_path, monkeypatch):

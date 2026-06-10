@@ -54,7 +54,7 @@ Otherwise scale down:
 git status --short                          # know exactly what changed, incl. untracked
 git ls-files --others --exclude-standard    # untracked files that would be missed below
 git grep -nE '^(<{7} |={7}$|>{7} )' -- '*.py' '*.txt' '*.spec' '*.md'   # conflict markers, anchored (docs legitimately contain ===== separator lines; plain grep wades into .venv)
-git ls-files '*.py' | xargs ./.venv/bin/python scripts/dup_method_check.py
+{ git ls-files '*.py'; git ls-files --others --exclude-standard '*.py'; } | xargs ./.venv/bin/python scripts/dup_method_check.py
 git diff --check && git diff --cached --check
 ./.venv/bin/python -m pytest tests/ -q     # 0 failures
 ruff check . && ruff format --check .      # CI runs these; fail them locally first
@@ -131,10 +131,10 @@ QT_QPA_PLATFORM=offscreen ./.venv/bin/python scripts/e2e_driver.py \
 | YouTube baseline | `--source youtube --format mp3 --quality 320` | 16/16 honest 320 CBR mp3, full ID3 (TRCK/TPOS need the Mercury metadata service) |
 | librespot native | `--source librespot --format ogg` | vorbis 44.1k, VBR ~260–380 around declared 320, protobuf tags + cover |
 | librespot resume | rerun the same `--out` | manifest skips done tracks, fetches only missing |
-| librespot extended | `--source librespot --format ogg --extended --librespot-extended-yt-fallback --client-id <ID> --client-secret <SECRET>` | client-credentials search (no 429), strict-title YT extended or clean per-track failure |
+| librespot extended | `--source librespot --format ogg --extended --fallback-order youtube --client-id <ID> --client-secret <SECRET>` | client-credentials search (no 429), strict-title YT extended or clean per-track failure |
 | lossless via Tidal | `--source lossless --format flac --tidal-api-url http://127.0.0.1:8000` | genuine FLAC at native mixed formats (44.1/16 … 192/24), provider tags + art |
-| lossless fallback | `--source lossless --format flac` with services dead/absent | honest **mp3 320** + "MP3 320k, not lossless" status + `via_youtube_fallback: true` — never flac/wav from a lossy source |
-| pure lossless | add `--no-lossless-yt-fallback`, services failing | every track fails loudly, **zero files** |
+| lossless fallback | `--source lossless --format flac --fallback-order youtube` with services dead/absent | honest **mp3 320** + "MP3 320k, not lossless" status + `via_youtube_fallback: true` — never flac/wav from a lossy source |
+| pure lossless | add `--fallback-order ""`, services failing | every track fails loudly, **zero files** |
 | metadata A/B | one track, `--flac-metadata-source spotify` vs `provider` | tags switch release (provider = same release as the bytes) |
 
 (Read client id/secret from the app config with python; never echo the secret.)

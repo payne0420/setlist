@@ -41,6 +41,7 @@ sys.path.insert(0, os.getcwd())
 
 from PyQt5.QtCore import Qt  # noqa: E402
 
+from backends import DEFAULT_FALLBACK_ORDER  # noqa: E402
 from Spotify_Downloader import MusicScraper, detect_spotify_url_type  # noqa: E402
 
 _EV_LOCK = threading.Lock()
@@ -68,14 +69,25 @@ def main():
         default="",
         help="path to a YouTube Premium cookies.txt; download-only",
     )
-    p.add_argument("--librespot-extended-yt-fallback", action="store_true")
+    p.add_argument(
+        "--fallback-order",
+        default=None,
+        help='comma-separated fallback chain (e.g. "youtube" or "librespot,youtube"); '
+        '"" = no fallback; unset = app default for source',
+    )
     # lossless knobs
     p.add_argument("--tidal-api-url", default="")
     p.add_argument("--lossless-quality", default="27")
     p.add_argument("--lossless-service-order", default="qobuz,amazon")
-    p.add_argument("--no-lossless-yt-fallback", action="store_true")
     p.add_argument("--flac-metadata-source", default="provider")
     args = p.parse_args()
+
+    if args.fallback_order is None:
+        fallback_order = DEFAULT_FALLBACK_ORDER[args.source]
+    elif args.fallback_order == "":
+        fallback_order = ()
+    else:
+        fallback_order = tuple(s.strip() for s in args.fallback_order.split(",") if s.strip())
 
     os.makedirs(args.out, exist_ok=True)
     events = []
@@ -98,10 +110,9 @@ def main():
         tidal_api_url=args.tidal_api_url,
         lossless_quality=args.lossless_quality,
         lossless_service_order=args.lossless_service_order,
-        lossless_youtube_fallback=not args.no_lossless_yt_fallback,
+        fallback_order=fallback_order,
         flac_metadata_source=args.flac_metadata_source,
         spotify_credentials_path=args.credentials_path,
-        librespot_extended_yt_fallback=args.librespot_extended_yt_fallback,
         spotify_client_id=args.client_id,
         spotify_client_secret=args.client_secret,
         youtube_cookies_file=args.cookies_file,
@@ -130,6 +141,8 @@ def main():
                     "file",
                     "actual_ext",
                     "via_youtube_fallback",
+                    "served_by",
+                    "primary_source",
                     "source",
                 )
             },

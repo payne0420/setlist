@@ -32,5 +32,9 @@ class OggCaptureError(LibrespotError):
     """The native OGG stream could not be captured (no audio file, bad header, etc.)."""
 
 
+class NoExtendedCutError(LibrespotError):
+    """Extended search succeeded but found no extended/club mix (chain may advance)."""
+
+
 class LibrespotCancelled(LibrespotError):
     """The user cancelled mid-download (cooperative cancel via the cancel callback)."""

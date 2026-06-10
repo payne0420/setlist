@@ -23,7 +23,18 @@ class YouTubeBackend:
     def __init__(self, scraper):
         self._scraper = scraper
 
-    def fetch(self, *, track, destination, extended, audio_format, audio_quality, cancel):
+    def fetch(
+        self,
+        *,
+        track,
+        destination,
+        extended,
+        audio_format,
+        audio_quality,
+        cancel,
+        has_fallback: bool = False,
+    ):
+        del has_fallback
         s = self._scraper
         # In extended mode the title is stripped of a "Radio Edit" descriptor so
         # the search isn't anchored to the short edit (matches the pre-refactor

@@ -12,6 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **If unavailable, try** — a single ordered fallback chain in the Output settings
+  card replaces the per-source YouTube fallback checkboxes. Choose what happens
+  when the primary source cannot serve a track (e.g. lossless → Spotify →
+  YouTube). Persisted as `fallback_order` in config; old toggle keys migrate on
+  load.
+
 ### Changed
 
 - The **Audio format** setting now only offers formats the selected download
@@ -31,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   YouTube's lossy stream to Ogg Vorbis (a pointless extra lossy generation
   that also failed on ffmpeg builds without `libvorbis`), mirroring the Real
   FLAC fallback behavior.
+- Librespot users who had the extended-mix YouTube toggle **off** now divert
+  extended-mix soft misses to YouTube by default: migrated configs get
+  `fallback_order: ["youtube"]`, and the chain decides extended-mix semantics.
 
 ### Fixed
 

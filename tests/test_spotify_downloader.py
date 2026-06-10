@@ -2566,3 +2566,265 @@ class TestConfigYoutubeCookies:
         cfg.write_text(json.dumps({"youtube_cookies_file": 123}))
         monkeypatch.setattr("Spotify_Downloader._config_path", lambda: str(cfg))
         assert load_config()["youtube_cookies_file"] == ""
+
+
+class TestFallbackOrderConfig:
+    def test_fresh_defaults_per_source(self, tmp_path, monkeypatch):
+        from Spotify_Downloader import load_config
+
+        monkeypatch.setattr(
+            "Spotify_Downloader._config_path", lambda: str(tmp_path / "missing.json")
+        )
+        assert load_config()["fallback_order"] == []
+
+    def test_old_keys_absent_after_save(self, tmp_path, monkeypatch):
+        import json
+
+        from Spotify_Downloader import load_config, save_config
+
+        cfg_path = tmp_path / "config.json"
+        monkeypatch.setattr("Spotify_Downloader._config_path", lambda: str(cfg_path))
+        cfg = load_config()
+        save_config(cfg)
+        saved = json.loads(cfg_path.read_text())
+        assert "lossless_youtube_fallback" not in saved
+        assert "librespot_extended_yt_fallback" not in saved
+        assert "fallback_order" in saved
+
+
+class TestFallbackChainIntegration:
+    def test_lossless_chain_sets_served_by_and_via_youtube(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+
+        from backends.librespot.errors import LibrespotNotPremium
+        from lossless.errors import NotFoundOnServiceError
+        from Spotify_Downloader import MusicScraper
+
+        scraper = MusicScraper(
+            download_source="lossless",
+            fallback_order=["librespot", "youtube"],
+        )
+        lossless = scraper._backend._steps[0][1]
+        lib = scraper._backend._steps[1][1]
+        yt = scraper._backend._steps[2][1]
+
+        class Q:
+            def search_by_isrc(self, *a, **k):
+                raise NotFoundOnServiceError("nope")
+
+        lossless._isrc = SimpleNamespace(resolve=lambda _id: None)
+        lossless._qobuz = Q()
+        monkeypatch.setattr(
+            lib, "_ensure_session", lambda: (_ for _ in ()).throw(LibrespotNotPremium("x"))
+        )
+
+        def fake_yt(**kw):
+            dest = kw["destination"]
+            with open(dest, "wb") as f:
+                f.write(b"id3")
+            return dest, "mp3", False
+
+        monkeypatch.setattr(yt, "fetch", fake_yt)
+
+        emitted = []
+        scraper.add_song_meta.connect(lambda m: emitted.append(dict(m)))
+
+        track = SimpleNamespace(
+            id="tid",
+            title="Song",
+            artists="Artist",
+            album="Alb",
+            duration_ms=200000,
+            cover_url=None,
+            release_date="",
+        )
+        monkeypatch.setattr(scraper, "_enrich_song_meta", lambda *_a, **_kw: None)
+        monkeypatch.setattr(
+            scraper, "_resolve_extended_output", lambda path, *_a, **_kw: (path, "Song")
+        )
+        monkeypatch.setattr(scraper, "_record_in_manifest", lambda *_a, **_kw: None)
+        monkeypatch.setattr(scraper, "_finish_track_ui", lambda *_a, **_kw: None)
+
+        scraper._download_one_track(track, str(tmp_path), None)
+        assert emitted
+        meta = emitted[0]
+        assert meta["served_by"] == "youtube"
+        assert meta["primary_source"] == "lossless"
+        assert meta["via_youtube_fallback"] is True
+
+
+class TestFallbackChainMetadataSeam:
+    def _song_meta(self):
+        return {
+            "title": "Song",
+            "artists": "Artist,\xa0Feat",
+            "album": "",
+            "releaseDate": "",
+            "trackNumber": 7,
+        }
+
+    def test_chain_lossless_spotify_pref_uses_forwarded_isrc(self):
+        from types import SimpleNamespace
+
+        from backends.chain import FallbackChainBackend
+        from Spotify_Downloader import MusicScraper
+
+        lossless = SimpleNamespace(
+            name="lossless",
+            max_concurrency=4,
+            _isrc=MagicMock(),
+        )
+        lossless._isrc.resolve_metadata.return_value = {
+            "album": "Spotify Album",
+            "artists": "Artist",
+            "trackNumber": 1,
+        }
+        lossless.provider_metadata_for = lambda _tid: {
+            "source": "qobuz",
+            "meta": {"album": "Qobuz Album", "artists": "Artist", "trackNumber": 2},
+        }
+        scraper_ns = SimpleNamespace(error_signal=SimpleNamespace(emit=lambda *_a: None))
+        chain = FallbackChainBackend("lossless", [("lossless", lossless)], scraper=scraper_ns)
+        scraper = MusicScraper(download_source="lossless", flac_metadata_source="spotify")
+        scraper._backend = chain
+        meta = self._song_meta()
+        scraper._enrich_song_meta(meta, "tid")
+        assert meta["album"] == "Spotify Album"
+        assert meta["trackNumber"] == 1
+
+    def test_chain_librespot_served_uses_last_track_metadata(self):
+        from types import SimpleNamespace
+
+        from backends.chain import FallbackChainBackend
+        from Spotify_Downloader import MusicScraper
+
+        lib = SimpleNamespace(
+            name="librespot",
+            max_concurrency=1,
+            last_track_metadata={"album": "From Librespot", "artists": "Artist"},
+            provider_metadata_for=lambda _tid: None,
+        )
+        scraper_ns = SimpleNamespace(error_signal=SimpleNamespace(emit=lambda *_a: None))
+        chain = FallbackChainBackend("librespot", [("librespot", lib)], scraper=scraper_ns)
+        chain._tls.last_track_metadata = lib.last_track_metadata
+        scraper = MusicScraper(download_source="librespot")
+        scraper._backend = chain
+        scraper._metadata_service = SimpleNamespace(
+            get=lambda _id: (_ for _ in ()).throw(AssertionError("service must not be called"))
+        )
+        meta = self._song_meta()
+        scraper._enrich_song_meta(meta, "tid")
+        assert meta["album"] == "From Librespot"
+
+    def test_chain_youtube_served_uses_metadata_service(self):
+        from types import SimpleNamespace
+
+        from backends.chain import FallbackChainBackend
+        from Spotify_Downloader import MusicScraper
+
+        yt = SimpleNamespace(
+            name="youtube",
+            max_concurrency=4,
+            last_track_metadata=None,
+            provider_metadata_for=lambda _tid: None,
+        )
+        scraper_ns = SimpleNamespace(error_signal=SimpleNamespace(emit=lambda *_a: None))
+        chain = FallbackChainBackend("lossless", [("youtube", yt)], scraper=scraper_ns)
+        chain._tls.served_by = "youtube"
+        scraper = MusicScraper(download_source="lossless", fallback_order=["youtube"])
+        scraper._backend = chain
+        scraper._metadata_service = SimpleNamespace(
+            get=lambda tid: (
+                {"album": "YT Album", "artists": "YT Artist", "trackNumber": 1}
+                if tid == "tid"
+                else None
+            )
+        )
+        meta = self._song_meta()
+        scraper._enrich_song_meta(meta, "tid")
+        assert meta["album"] == "YT Album"
+        assert meta["artists"] == "YT Artist"
+
+    def test_lossless_leaf_no_provider_record_spotify_pref_uses_resolver(self):
+        from types import SimpleNamespace
+
+        from Spotify_Downloader import MusicScraper
+
+        lossless = SimpleNamespace(
+            provider_metadata_for=lambda _tid: None,
+            _isrc=MagicMock(),
+        )
+        lossless._isrc.resolve_metadata.return_value = {
+            "album": "Spotify Album",
+            "artists": "Artist",
+            "trackNumber": 1,
+        }
+        scraper = MusicScraper(download_source="lossless", flac_metadata_source="spotify")
+        scraper._backend = lossless
+        scraper._metadata_service = SimpleNamespace(
+            get=lambda _id: (_ for _ in ()).throw(AssertionError("service must not be called"))
+        )
+        meta = self._song_meta()
+        scraper._enrich_song_meta(meta, "tid")
+        assert meta["album"] == "Spotify Album"
+        lossless._isrc.resolve_metadata.assert_called_once_with("tid")
+
+    def test_chain_lossless_served_no_provider_record_spotify_pref_uses_resolver(self):
+        from types import SimpleNamespace
+
+        from backends.chain import FallbackChainBackend
+        from Spotify_Downloader import MusicScraper
+
+        lossless = SimpleNamespace(
+            name="lossless",
+            max_concurrency=4,
+            provider_metadata_for=lambda _tid: None,
+            _isrc=MagicMock(),
+        )
+        lossless._isrc.resolve_metadata.return_value = {
+            "album": "Spotify Album",
+            "artists": "Artist",
+            "trackNumber": 1,
+        }
+        scraper_ns = SimpleNamespace(error_signal=SimpleNamespace(emit=lambda *_a: None))
+        chain = FallbackChainBackend("lossless", [("lossless", lossless)], scraper=scraper_ns)
+        chain._tls.served_by = "lossless"
+        scraper = MusicScraper(download_source="lossless", flac_metadata_source="spotify")
+        scraper._backend = chain
+        scraper._metadata_service = SimpleNamespace(
+            get=lambda _id: (_ for _ in ()).throw(AssertionError("service must not be called"))
+        )
+        meta = self._song_meta()
+        scraper._enrich_song_meta(meta, "tid")
+        assert meta["album"] == "Spotify Album"
+        lossless._isrc.resolve_metadata.assert_called_once_with("tid")
+
+    def test_skip_path_ignores_stale_chain_served_by(self):
+        from types import SimpleNamespace
+
+        from backends.chain import FallbackChainBackend
+        from Spotify_Downloader import MusicScraper
+
+        lossless = SimpleNamespace(
+            name="lossless",
+            max_concurrency=4,
+            provider_metadata_for=lambda _tid: None,
+            _isrc=MagicMock(),
+        )
+        lossless._isrc.resolve_metadata.return_value = {
+            "album": "Spotify Album",
+            "artists": "Artist",
+            "trackNumber": 1,
+        }
+        scraper_ns = SimpleNamespace(error_signal=SimpleNamespace(emit=lambda *_a: None))
+        chain = FallbackChainBackend("lossless", [("lossless", lossless)], scraper=scraper_ns)
+        chain._tls.served_by = "youtube"  # stale from a prior track
+        scraper = MusicScraper(download_source="lossless", flac_metadata_source="spotify")
+        scraper._backend = chain
+        scraper._metadata_service = SimpleNamespace(
+            get=lambda _id: (_ for _ in ()).throw(AssertionError("service must not be called"))
+        )
+        meta = self._song_meta()
+        scraper._enrich_song_meta(meta, "tid", fresh_fetch=False)
+        assert meta["album"] == "Spotify Album"
+        lossless._isrc.resolve_metadata.assert_called_once_with("tid")

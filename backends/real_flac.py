@@ -28,8 +28,6 @@ from lossless.qobuz import QobuzClient
 from lossless.spotify_isrc import SpotifyIsrcResolver
 from lossless.validate import is_acceptable_duration
 
-from .youtube import YouTubeBackend
-
 _FLAC_MAGIC = b"fLaC"
 
 
@@ -69,7 +67,6 @@ class RealFlacBackend:
         self._session: requests.Session = getattr(scraper, "session", None) or requests.Session()
         self._isrc = SpotifyIsrcResolver(self._session)
         self._qobuz = QobuzClient(self._session)
-        self._youtube = YouTubeBackend(scraper)
         self._amazon = None  # lazily built on first Amazon attempt
         self._tidal = None
         self._bridge_cache: dict[str, dict] = {}  # ISRC -> {tidal_url, amazon_url, deezer}
@@ -87,15 +84,6 @@ class RealFlacBackend:
         self._service_order_cfg = str(
             getattr(scraper, "lossless_service_order", "qobuz,amazon") or "qobuz,amazon"
         )
-        # When every lossless service fails: fall back to YouTube (a non-lossless
-        # file) if True, else fail the track so only genuine lossless ever lands.
-        self._youtube_fallback = bool(getattr(scraper, "lossless_youtube_fallback", True))
-        self._yt_fallback_flag = threading.local()
-
-    @property
-    def used_youtube_fallback(self) -> bool:
-        """True when the LAST fetch on THIS thread was served by YouTube fallback."""
-        return bool(getattr(self._yt_fallback_flag, "value", False))
 
     # -- helpers ------------------------------------------------------------ #
     @staticmethod
@@ -153,8 +141,18 @@ class RealFlacBackend:
             self._provider_meta[str(track_id)] = {"source": source, "meta": meta or {}}
 
     # -- fetch -------------------------------------------------------------- #
-    def fetch(self, *, track, destination, extended, audio_format, audio_quality, cancel):
-        self._yt_fallback_flag.value = False
+    def fetch(
+        self,
+        *,
+        track,
+        destination,
+        extended,
+        audio_format,
+        audio_quality,
+        cancel,
+        has_fallback: bool = False,
+    ):
+        del has_fallback
         expected_s = self._expected_seconds(track)
 
         # Resolve ISRC once (cached on the track + on disk). Best-effort: a missing
@@ -191,34 +189,7 @@ class RealFlacBackend:
         if cancel():
             raise LosslessError("download cancelled")
 
-        # Every lossless service failed. With the fallback toggle off, fail the
-        # track instead of fetching a lossy YouTube copy (pure-lossless mode).
-        if not self._youtube_fallback:
-            raise NotFoundOnServiceError("no lossless source found (YouTube fallback off)")
-
-        # Otherwise fall back to YouTube so the track still downloads (non-lossless).
-        # Mark the source degraded so the seam knows album/track-number metadata
-        # is unavailable from a provider (it still enriches from Spotify spclient).
-        self._record_provider_meta(track.id, "youtube", None)
-        yt_format, yt_quality = audio_format, audio_quality
-        if audio_format in ("flac", "wav"):
-            yt_format, yt_quality = "mp3", "320"
-        self._yt_fallback_flag.value = True
-        with contextlib.suppress(Exception):
-            msg = (
-                "Lossless source unavailable — fell back to YouTube (MP3 320k, not lossless)"
-                if audio_format in ("flac", "wav")
-                else "Lossless source unavailable — fell back to YouTube (not lossless)"
-            )
-            self._scraper.error_signal.emit(msg)
-        return self._youtube.fetch(
-            track=track,
-            destination=destination,
-            extended=extended,
-            audio_format=yt_format,
-            audio_quality=yt_quality,
-            cancel=cancel,
-        )
+        raise NotFoundOnServiceError("no lossless source found")
 
     # -- Qobuz -------------------------------------------------------------- #
     def _try_qobuz(self, *, track, isrc, destination, extended, expected_s, cancel):

@@ -37,13 +37,17 @@ def _valid_cookie_file(tmp_path):
     return str(p)
 
 
-def test_youtube_card_enabled_only_for_youtube_source(win):
+def test_youtube_card_enabled_for_primary_or_chain(win):
     panel = win.settings_panel
     _select_source(panel, "youtube")
     assert panel._youtube_card.isEnabled()
     _select_source(panel, "lossless")
-    assert not panel._youtube_card.isEnabled()
+    assert panel._youtube_card.isEnabled()  # default chain includes youtube
     _select_source(panel, "librespot")
+    assert panel._youtube_card.isEnabled()  # default chain includes youtube
+    labels = [panel._fallback_cb.itemText(j) for j in range(panel._fallback_cb.count())]
+    idx = labels.index("Nothing — skip track")
+    panel._fallback_cb.setCurrentIndex(idx)
     assert not panel._youtube_card.isEnabled()
     _select_source(panel, "youtube")
     assert panel._youtube_card.isEnabled()

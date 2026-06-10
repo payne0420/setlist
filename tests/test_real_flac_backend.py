@@ -483,16 +483,18 @@ class TestRealFlacBackendFetch:
         backend._qobuz = MagicMock()
         backend._qobuz.search_by_isrc.return_value = {"id": 42}
         backend._qobuz.get_download_url.return_value = "https://cdn/x.mp3"
-        backend._youtube = MagicMock()
-        backend._youtube.fetch.return_value = ("/yt.flac", "flac", False)
+        backend._try_amazon = MagicMock(side_effect=qobuz.NotFoundOnServiceError("no amazon"))
 
         def fake_download(url, path, cancel):
             with open(path, "wb") as f:
                 f.write(b"ID3\x00fake-mp3")  # NOT FLAC
 
         backend._download = fake_download
-        with patch("backends.real_flac.is_acceptable_duration", return_value=(True, "")):
-            path, ext, used = backend.fetch(
+        with (
+            patch("backends.real_flac.is_acceptable_duration", return_value=(True, "")),
+            pytest.raises(qobuz.NotFoundOnServiceError, match="no lossless source found"),
+        ):
+            backend.fetch(
                 track=self._track(),
                 destination=str(tmp_path / "o.mp3"),
                 extended=False,
@@ -500,9 +502,6 @@ class TestRealFlacBackendFetch:
                 audio_quality="192",
                 cancel=lambda: False,
             )
-        # All lossless services rejected the non-FLAC -> YouTube fallback used.
-        backend._youtube.fetch.assert_called_once()
-        assert (path, ext, used) == ("/yt.flac", "flac", False)
 
     def test_extended_uses_catalog_search(self, tmp_path):
         backend = self._backend()
@@ -535,34 +534,12 @@ class TestRealFlacBackendFetch:
         assert captured["id"] == 10  # the longer, keyworded candidate
         backend._qobuz.search.assert_called()  # catalog search, not ISRC
 
-    def test_all_services_fail_falls_back_to_youtube(self, tmp_path):
+    def test_all_services_fail_raises_not_found(self, tmp_path):
         backend = self._backend()
         backend._isrc = MagicMock(resolve=lambda _id: None)
         backend._qobuz = MagicMock()
         backend._qobuz.search_by_isrc.side_effect = qobuz.NotFoundOnServiceError("nope")
-        backend._youtube = MagicMock()
-        backend._youtube.fetch.return_value = ("/yt/out.flac", "flac", False)
-        path, ext, used = backend.fetch(
-            track=self._track(),
-            destination=str(tmp_path / "o.mp3"),
-            extended=False,
-            audio_format="flac",
-            audio_quality="192",
-            cancel=lambda: False,
-        )
-        backend._youtube.fetch.assert_called_once()
-        assert path == "/yt/out.flac"
-
-    def test_fallback_toggle_off_skips_youtube(self, tmp_path):
-        # Pure-lossless: when the toggle is off, a track with no lossless source
-        # is failed/skipped rather than downloaded from YouTube.
-        backend = self._backend(lossless_youtube_fallback=False)
-        assert backend._youtube_fallback is False
-        backend._isrc = MagicMock(resolve=lambda _id: None)
-        backend._qobuz = MagicMock()
-        backend._qobuz.search_by_isrc.side_effect = qobuz.NotFoundOnServiceError("nope")
-        backend._youtube = MagicMock()
-        with pytest.raises(qobuz.NotFoundOnServiceError):
+        with pytest.raises(qobuz.NotFoundOnServiceError, match="no lossless source found"):
             backend.fetch(
                 track=self._track(),
                 destination=str(tmp_path / "o.mp3"),
@@ -571,10 +548,6 @@ class TestRealFlacBackendFetch:
                 audio_quality="192",
                 cancel=lambda: False,
             )
-        backend._youtube.fetch.assert_not_called()
-
-    def test_fallback_toggle_default_on(self):
-        assert self._backend()._youtube_fallback is True
 
     def test_cancel_short_circuits(self, tmp_path):
         from lossless.errors import LosslessError
@@ -582,9 +555,7 @@ class TestRealFlacBackendFetch:
         backend = self._backend()
         backend._isrc = MagicMock(resolve=lambda _id: "USUM71703861")
         backend._qobuz = MagicMock()
-        backend._youtube = MagicMock(fetch=MagicMock(return_value=("/yt.flac", "flac", False)))
-        # Cancel before any service runs -> fetch raises, and we do NOT kick off a
-        # Qobuz resolution OR an unwanted YouTube download for a stopped track.
+        # Cancel before any service runs -> fetch raises without unwanted work.
         with pytest.raises(LosslessError):
             backend.fetch(
                 track=self._track(isrc="USUM71703861"),
@@ -595,107 +566,6 @@ class TestRealFlacBackendFetch:
                 cancel=lambda: True,
             )
         backend._qobuz.search_by_isrc.assert_not_called()
-        backend._youtube.fetch.assert_not_called()
-
-    def test_fallback_flac_remapped_to_mp3_320(self, tmp_path):
-        backend = self._backend()
-        backend._isrc = MagicMock(resolve=lambda _id: None)
-        backend._qobuz = MagicMock()
-        backend._qobuz.search_by_isrc.side_effect = qobuz.NotFoundOnServiceError("nope")
-        backend._youtube = MagicMock()
-        backend._youtube.fetch.return_value = ("/yt/out.mp3", "mp3", False)
-        backend.fetch(
-            track=self._track(),
-            destination=str(tmp_path / "o.mp3"),
-            extended=False,
-            audio_format="flac",
-            audio_quality="192",
-            cancel=lambda: False,
-        )
-        kw = backend._youtube.fetch.call_args.kwargs
-        assert kw["audio_format"] == "mp3"
-        assert kw["audio_quality"] == "320"
-        assert backend.used_youtube_fallback is True
-
-    def test_fallback_wav_remapped_to_mp3_320(self, tmp_path):
-        backend = self._backend()
-        backend._isrc = MagicMock(resolve=lambda _id: None)
-        backend._qobuz = MagicMock()
-        backend._qobuz.search_by_isrc.side_effect = qobuz.NotFoundOnServiceError("nope")
-        backend._youtube = MagicMock()
-        backend._youtube.fetch.return_value = ("/yt/out.mp3", "mp3", False)
-        backend.fetch(
-            track=self._track(),
-            destination=str(tmp_path / "o.mp3"),
-            extended=False,
-            audio_format="wav",
-            audio_quality="192",
-            cancel=lambda: False,
-        )
-        kw = backend._youtube.fetch.call_args.kwargs
-        assert kw["audio_format"] == "mp3"
-        assert kw["audio_quality"] == "320"
-        assert backend.used_youtube_fallback is True
-
-    def test_fallback_m4a_passed_through_unchanged(self, tmp_path):
-        backend = self._backend()
-        backend._isrc = MagicMock(resolve=lambda _id: None)
-        backend._qobuz = MagicMock()
-        backend._qobuz.search_by_isrc.side_effect = qobuz.NotFoundOnServiceError("nope")
-        backend._youtube = MagicMock()
-        backend._youtube.fetch.return_value = ("/yt/out.m4a", "m4a", False)
-        backend.fetch(
-            track=self._track(),
-            destination=str(tmp_path / "o.mp3"),
-            extended=False,
-            audio_format="m4a",
-            audio_quality="192",
-            cancel=lambda: False,
-        )
-        kw = backend._youtube.fetch.call_args.kwargs
-        assert kw["audio_format"] == "m4a"
-        assert kw["audio_quality"] == "192"
-        assert backend.used_youtube_fallback is True
-
-    def test_qobuz_success_used_youtube_fallback_false(self, tmp_path):
-        backend = self._backend()
-        backend._isrc = MagicMock(resolve=lambda _id: "USUM71703861")
-        backend._qobuz = MagicMock()
-        backend._qobuz.search_by_isrc.return_value = {"id": 42}
-        backend._qobuz.get_download_url.return_value = "https://cdn/x.flac"
-
-        def fake_download(url, path, cancel):
-            with open(path, "wb") as f:
-                f.write(b"fLaC" + b"\x00" * 200)
-
-        backend._download = fake_download
-        with patch("backends.real_flac.is_acceptable_duration", return_value=(True, "")):
-            backend.fetch(
-                track=self._track(),
-                destination=str(tmp_path / "out.mp3"),
-                extended=False,
-                audio_format="flac",
-                audio_quality="192",
-                cancel=lambda: False,
-            )
-        assert backend.used_youtube_fallback is False
-
-    def test_fallback_toggle_off_used_youtube_fallback_false(self, tmp_path):
-        backend = self._backend(lossless_youtube_fallback=False)
-        backend._isrc = MagicMock(resolve=lambda _id: None)
-        backend._qobuz = MagicMock()
-        backend._qobuz.search_by_isrc.side_effect = qobuz.NotFoundOnServiceError("nope")
-        backend._youtube = MagicMock()
-        with pytest.raises(qobuz.NotFoundOnServiceError):
-            backend.fetch(
-                track=self._track(),
-                destination=str(tmp_path / "o.mp3"),
-                extended=False,
-                audio_format="flac",
-                audio_quality="192",
-                cancel=lambda: False,
-            )
-        assert backend.used_youtube_fallback is False
 
 
 # --------------------------------------------------------------------------- #

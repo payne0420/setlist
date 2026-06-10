@@ -69,7 +69,14 @@ from yt_dlp import YoutubeDL
 
 import theme
 import track_selectors
-from backends import DEFAULT_DOWNLOAD_SOURCE, KNOWN_DOWNLOAD_SOURCES, make_backend
+from backends import (
+    ALLOWED_FALLBACKS,
+    DEFAULT_DOWNLOAD_SOURCE,
+    DEFAULT_FALLBACK_ORDER,
+    KNOWN_DOWNLOAD_SOURCES,
+    make_backend,
+    validate_fallback_order,
+)
 from download_queue import (
     ACTIVE,
     CANCELLED,
@@ -214,9 +221,9 @@ def load_config() -> dict:
         "tidal_api_url": "",
         "lossless_quality": "27",
         "lossless_service_order": "qobuz,amazon",
-        # When no lossless service can serve a track, fall back to YouTube (a
-        # non-lossless file). Off = skip/fail the track instead (pure-lossless).
-        "lossless_youtube_fallback": True,
+        # Ordered fallback chain when the primary source cannot serve a track.
+        # Stored as a JSON list of source ids; validated per download_source.
+        "fallback_order": [],
         # Which source wins for album/track-number/cover tags on Real-FLAC files:
         # "provider" (default) = the release the FLAC bytes came from; "spotify" =
         # the exact album of the user's Spotify track. See _enrich_song_meta.
@@ -234,10 +241,6 @@ def load_config() -> dict:
         # to yt-dlp DOWNLOAD invocations (never search) to surface the Premium-only
         # ~256 kbps formats (774 Opus / 141 AAC). "" = disabled (anonymous, ~128 kbps).
         "youtube_cookies_file": "",
-        # In extended-mix mode, when Spotify has no extended/club mix for a track,
-        # fall back to YouTube (which often hosts the 12"/extended cut) instead of
-        # streaming the original Spotify track. Off by default.
-        "librespot_extended_yt_fallback": False,
     }
     try:
         with open(_config_path(), encoding="utf-8") as f:
@@ -283,8 +286,17 @@ def load_config() -> dict:
         )
         if not isinstance(defaults.get("lossless_service_order"), str):
             defaults["lossless_service_order"] = "qobuz,amazon"
-        defaults["lossless_youtube_fallback"] = bool(
-            defaults.get("lossless_youtube_fallback", True)
+        source = defaults["download_source"]
+        if "fallback_order" not in data:
+            if source == "youtube":
+                defaults["fallback_order"] = []
+            elif source == "lossless":
+                yt_fb = data.get("lossless_youtube_fallback", True)
+                defaults["fallback_order"] = ["youtube"] if yt_fb else []
+            elif source == "librespot":
+                defaults["fallback_order"] = ["youtube"]
+        defaults["fallback_order"] = list(
+            validate_fallback_order(source, defaults.get("fallback_order"))
         )
         if defaults.get("flac_metadata_source") not in ("provider", "spotify"):
             defaults["flac_metadata_source"] = "provider"
@@ -479,10 +491,9 @@ class MusicScraper(QThread):
         tidal_api_url: str = "",
         lossless_quality: str = "27",
         lossless_service_order: str = "qobuz,amazon",
-        lossless_youtube_fallback: bool = True,
+        fallback_order=(),
         flac_metadata_source: str = "provider",
         spotify_credentials_path: str = "",
-        librespot_extended_yt_fallback: bool = False,
         spotify_client_id: str = "",
         spotify_client_secret: str = "",
         youtube_cookies_file: str = "",
@@ -537,7 +548,7 @@ class MusicScraper(QThread):
         self.tidal_api_url = tidal_api_url
         self.lossless_quality = lossless_quality
         self.lossless_service_order = lossless_service_order
-        self.lossless_youtube_fallback = bool(lossless_youtube_fallback)
+        self.fallback_order = tuple(validate_fallback_order(download_source, fallback_order))
         # Which source wins for the album-coupled tags (album, track/disc number,
         # cover, release date): "provider" = the release the FLAC bytes came from
         # (default; honors "from the lossless provider directly"), "spotify" = the
@@ -552,9 +563,6 @@ class MusicScraper(QThread):
         # librespot backend at fetch time; "" lets it use its default path. Set
         # before make_backend so the backend can read it off the scraper.
         self.spotify_credentials_path = spotify_credentials_path
-        # Extended-mix mode: if Spotify has no extended cut, let the librespot backend
-        # fall back to YouTube (which often hosts it) rather than the original track.
-        self.librespot_extended_yt_fallback = bool(librespot_extended_yt_fallback)
         # User's own Spotify app credentials for the extended-mix search (see
         # backends.librespot.webapi). Read by the librespot backend below; set before
         # make_backend so the backend can build its token provider off the scraper.
@@ -563,7 +571,9 @@ class MusicScraper(QThread):
         self.youtube_cookies_file = (youtube_cookies_file or "").strip()
         self._premium_status_reported = False
         self._cookie_warning_sent = False
-        self._backend = make_backend(download_source, scraper=self)
+        self._backend = make_backend(
+            download_source, scraper=self, fallback_order=self.fallback_order
+        )
         # Rich-metadata resolver for the NON-librespot path. The librespot streaming
         # path gets album/track-number/clean-artists from the captured protobuf; the
         # YouTube path can't get those from the no-auth embed, so it falls back to a
@@ -595,7 +605,7 @@ class MusicScraper(QThread):
         # Lossless backend failures (goal §2). Matched on message text so the
         # YouTube path never imports the lossless package.
         if "no lossless source found" in error_text:
-            return f"No lossless source for '{track_title}' — skipped (YouTube fallback off)"
+            return f"No lossless source for '{track_title}' — skipped (no fallback configured)"
         if "isrc" in error_text:
             return f"Couldn't find an ISRC for '{track_title}' - no lossless lookup"
         if "not genuine flac" in error_text or "lossy" in error_text:
@@ -1045,9 +1055,19 @@ class MusicScraper(QThread):
             song_meta["artists"] = artists.replace("\xa0", " ")
 
         backend = getattr(self, "_backend", None)
-        provider_getter = getattr(backend, "provider_metadata_for", None)
-        if callable(provider_getter) and track_id:
-            provider_meta = (provider_getter(track_id) or {}).get("meta") or {}
+        # Route by the source that actually served the audio. On skip paths
+        # (fresh_fetch=False) thread-local served_by may be stale from a prior
+        # worker — mirror the last_track_metadata guard and trust primary only.
+        if fresh_fetch:
+            served = getattr(backend, "served_by", None) or self.download_source
+        else:
+            served = self.download_source
+        if served == "lossless":
+            provider_record = None
+            provider_getter = getattr(backend, "provider_metadata_for", None)
+            if callable(provider_getter) and track_id:
+                provider_record = provider_getter(track_id)
+            provider_meta = (provider_record or {}).get("meta") or {}
             resolver = getattr(backend, "_isrc", None)
 
             # Resolve sources lazily in priority order: with provider-first and a
@@ -1254,8 +1274,11 @@ class MusicScraper(QThread):
             song_meta["actual_ext"] = actual_ext  # real container written (e.g. "ogg")
             # Reliable provenance flag (set by the backend) so History can mark tracks
             # that fell back to YouTube — independent of the file extension.
-            song_meta["via_youtube_fallback"] = getattr(
-                self._backend, "used_youtube_fallback", False
+            served = getattr(self._backend, "served_by", None) or self.download_source
+            song_meta["served_by"] = served
+            song_meta["primary_source"] = self.download_source
+            song_meta["via_youtube_fallback"] = (
+                served == "youtube" and self.download_source != "youtube"
             )
             self._enrich_song_meta(song_meta, track.id)
             self.add_song_meta.emit(song_meta)
@@ -1563,7 +1586,12 @@ class MusicScraper(QThread):
         song_meta["title"] = meta_title
         song_meta["file"] = final_path
         song_meta["actual_ext"] = actual_ext
-        song_meta["via_youtube_fallback"] = getattr(self._backend, "used_youtube_fallback", False)
+        served = getattr(self._backend, "served_by", None) or self.download_source
+        song_meta["served_by"] = served
+        song_meta["primary_source"] = self.download_source
+        song_meta["via_youtube_fallback"] = (
+            served == "youtube" and self.download_source != "youtube"
+        )
         self._enrich_song_meta(song_meta, track.id)
         self.add_song_meta.emit(song_meta)
         self.increment_counter()
@@ -1604,10 +1632,9 @@ class ScraperThread(QThread):
         tidal_api_url: str = "",
         lossless_quality: str = "27",
         lossless_service_order: str = "qobuz,amazon",
-        lossless_youtube_fallback: bool = True,
+        fallback_order=(),
         flac_metadata_source: str = "provider",
         spotify_credentials_path: str = "",
-        librespot_extended_yt_fallback: bool = False,
         spotify_client_id: str = "",
         spotify_client_secret: str = "",
         youtube_cookies_file: str = "",
@@ -1630,10 +1657,9 @@ class ScraperThread(QThread):
             tidal_api_url=tidal_api_url,
             lossless_quality=lossless_quality,
             lossless_service_order=lossless_service_order,
-            lossless_youtube_fallback=lossless_youtube_fallback,
+            fallback_order=fallback_order,
             flac_metadata_source=flac_metadata_source,
             spotify_credentials_path=spotify_credentials_path,
-            librespot_extended_yt_fallback=librespot_extended_yt_fallback,
             spotify_client_id=spotify_client_id,
             spotify_client_secret=spotify_client_secret,
             youtube_cookies_file=youtube_cookies_file,
@@ -1929,6 +1955,23 @@ class LibrespotLoginThread(QThread):
             self.failed.emit(str(exc))
 
 
+# (label, stored fallback_order tuple) per download_source — OUTPUT card combo.
+_FALLBACK_UI_CHOICES = {
+    "youtube": [("No fallback — YouTube is the last resort", ())],
+    "librespot": [
+        ("Nothing — skip track", ()),
+        ("YouTube", ("youtube",)),
+    ],
+    "lossless": [
+        ("Nothing — skip track", ()),
+        ("YouTube", ("youtube",)),
+        ("Spotify", ("librespot",)),
+        ("Spotify, then YouTube", ("librespot", "youtube")),
+        ("YouTube, then Spotify", ("youtube", "librespot")),
+    ],
+}
+
+
 class SettingsPanel(QWidget):
     """Settings as an embedded content page (no modal dialog).
 
@@ -1983,6 +2026,10 @@ class SettingsPanel(QWidget):
         self._source_cb.setFixedHeight(40)
         self._source_cb.currentIndexChanged.connect(self._on_source_change)
 
+        self._fallback_cb = theme.ThemedComboBox()
+        self._fallback_cb.setFixedHeight(40)
+        self._fallback_cb.currentIndexChanged.connect(self._on_fallback_change)
+
         # Only the formats the selected source actually delivers (SOURCE_FORMATS);
         # repopulated by _sync_format_choices when the source changes.
         self._format_cb = theme.ThemedComboBox()
@@ -2033,6 +2080,9 @@ class SettingsPanel(QWidget):
         out_card, out_form = self._card()
         out_form.addRow("Download folder", folder_row)
         out_form.addRow("Download source", self._field(self._source_cb, 210))
+        _fallback_row = self._field(self._fallback_cb, 210)
+        out_form.addRow("If unavailable, try", _fallback_row)
+        self._fallback_lbl = out_form.labelForField(_fallback_row)
         # Keep the labels of source-dependent rows so the sync helpers can grey
         # them out together with their controls (a disabled field with a bright
         # label still reads as editable).
@@ -2104,30 +2154,14 @@ class SettingsPanel(QWidget):
         self._tidal_api_field.setFixedHeight(40)
         self._tidal_api_field.editingFinished.connect(self._save_tidal_api)
 
-        # Fall back to YouTube (non-lossless) when no lossless source is found.
-        # Unchecked = pure-lossless: skip the track instead of grabbing a lossy
-        # copy.
-        self._lossless_fallback_cb = QCheckBox(
-            "Fall back to YouTube when no lossless source is found"
-        )
-        self._lossless_fallback_cb.setChecked(bool(cfg.get("lossless_youtube_fallback", True)))
-        self._lossless_fallback_cb.setToolTip(
-            "On: a track with no lossless source still downloads from YouTube "
-            "(not lossless). Off: that track is skipped, so only genuine lossless "
-            "files are ever saved."
-        )
-        self._lossless_fallback_cb.toggled.connect(
-            lambda on: self._save("lossless_youtube_fallback", on)
-        )
-
         disclaimer = QLabel(
             "Real FLAC pulls genuine lossless audio from unofficial third-party "
             "resolvers (Qobuz / Tidal / Amazon). These hosts can rate-limit or "
             "vanish, the Amazon/Tidal paths bypass service DRM, and use may "
             "violate those services' Terms of Service. A custom Tidal API instance "
             "is fully trusted with the tracks you resolve. When a lossless source "
-            "isn't available the app falls back to YouTube (not lossless) unless "
-            "you turn that off below. YouTube remains the default — this is a "
+            'isn\'t available, use the Output setting "If unavailable, try" to '
+            "choose a fallback chain. YouTube remains the default — this is a "
             "deliberate opt-in."
         )
         disclaimer.setWordWrap(True)
@@ -2136,7 +2170,6 @@ class SettingsPanel(QWidget):
         lossless_card, lossless_form = self._card()
         lossless_form.addRow("Tidal API instance", self._tidal_api_field)
         self._tidal_api_lbl = lossless_form.labelForField(self._tidal_api_field)
-        lossless_form.addRow(self._lossless_fallback_cb)
         lossless_form.addRow(disclaimer)
 
         # ---- Spotify account card (librespot backend) ----
@@ -2159,6 +2192,7 @@ class SettingsPanel(QWidget):
         # pinned formats grey out, etc.). _sync_format_choices is idempotent
         # here: it rebuilds the same items and triggers no save.
         self._sync_format_choices()
+        self._sync_fallback_choices()
         self._sync_extended_enabled(self._extended_mix_cb.isChecked())
         self._sync_lossless_enabled()
         self._refresh_spotify_status()
@@ -2217,7 +2251,6 @@ class SettingsPanel(QWidget):
         self._lossless_quality_lbl.setEnabled(on)
         self._tidal_api_field.setEnabled(on)
         self._tidal_api_lbl.setEnabled(on)
-        self._lossless_fallback_cb.setEnabled(on)
 
     def _save_tidal_api(self):
         """Persist the Tidal API instance (normalized: trimmed, https:// or
@@ -2262,6 +2295,44 @@ class SettingsPanel(QWidget):
         if chosen != current:
             self._save("format", chosen)
         self._sync_quality_enabled()
+
+    def _current_fallback_order(self) -> tuple[str, ...]:
+        stored = self._controller._config.get("fallback_order", [])
+        return validate_fallback_order(self._current_source(), stored)
+
+    def _sync_fallback_choices(self):
+        """Rebuild the fallback dropdown for the current source."""
+        source = self._current_source()
+        choices = _FALLBACK_UI_CHOICES[source]
+        current = self._current_fallback_order()
+        idx = next((i for i, (_, order) in enumerate(choices) if order == current), 0)
+        self._fallback_cb.blockSignals(True)
+        self._fallback_cb.clear()
+        for label, _order in choices:
+            self._fallback_cb.addItem(label)
+        self._fallback_cb.setCurrentIndex(idx)
+        self._fallback_cb.blockSignals(False)
+        on_youtube = source == "youtube"
+        self._fallback_cb.setEnabled(not on_youtube)
+        self._fallback_lbl.setEnabled(not on_youtube)
+        chosen = choices[idx][1]
+        if chosen != current:
+            self._save("fallback_order", list(chosen))
+
+    def _on_fallback_change(self, index: int):
+        source = self._current_source()
+        choices = _FALLBACK_UI_CHOICES[source]
+        if index < 0 or index >= len(choices):
+            return
+        order = choices[index][1]
+        if "librespot" in order and not bool(self._controller._config.get("librespot_consented")):
+            if not self._confirm_librespot_consent():
+                self._sync_fallback_choices()
+                return
+            self._save("librespot_consented", True)
+        self._save("fallback_order", list(order))
+        self._sync_spotify_card_enabled()
+        self._sync_youtube_card_enabled()
 
     # ---- Spotify account (librespot backend) ----------------------------
 
@@ -2355,7 +2426,9 @@ class SettingsPanel(QWidget):
             self._yt_cookies_status_lbl.setText(f"Not saved — {reason}.")
 
     def _sync_youtube_card_enabled(self):
-        self._youtube_card.setEnabled(self._current_source() == "youtube")
+        source = self._current_source()
+        chain = self._current_fallback_order()
+        self._youtube_card.setEnabled(source == "youtube" or "youtube" in chain)
 
     def _build_spotify_card(self, cfg):
         """Build the SPOTIFY ACCOUNT card: login/logout, account+Premium status, the
@@ -2385,19 +2458,6 @@ class SettingsPanel(QWidget):
         self._spotify_path_field.setReadOnly(True)
         self._spotify_path_field.setCursorPosition(0)
         self._spotify_path_field.setFixedHeight(40)
-
-        # Extended-mix fallback: when Spotify has no extended cut, search YouTube for it.
-        self._ext_yt_fallback_cb = QCheckBox("Use YouTube if no extended mix is on Spotify")
-        self._ext_yt_fallback_cb.setChecked(bool(cfg.get("librespot_extended_yt_fallback", False)))
-        self._ext_yt_fallback_cb.setToolTip(
-            "Extended-mix mode only: when Spotify has no extended / club mix for a track, "
-            "search YouTube for it (which often hosts the 12″/extended cut) instead of "
-            "downloading the original Spotify track. The result is a YouTube MP3, not native "
-            "OGG, and is flagged in History."
-        )
-        self._ext_yt_fallback_cb.toggled.connect(
-            lambda on: self._save("librespot_extended_yt_fallback", on)
-        )
 
         # Optional Spotify Developer app for the extended-mix search. librespot's own
         # (keymaster) token gets /v1/search hard-throttled/banned; the user's own app
@@ -2435,7 +2495,6 @@ class SettingsPanel(QWidget):
         card, form = self._card()
         form.addRow("Account", login_row)
         form.addRow("Credentials", self._spotify_path_field)
-        form.addRow(self._ext_yt_fallback_cb)
         form.addRow("API Client ID", self._spotify_client_id_field)
         form.addRow("API Client Secret", self._spotify_client_secret_field)
         form.addRow(api_help)
@@ -2457,6 +2516,7 @@ class SettingsPanel(QWidget):
         """Persist the download source, gating librespot behind a one-time consent
         dialog and toggling the Spotify card's enabled state."""
         source = self._source_options[index][1]
+        prev_source = self._source_options[self._source_index][1]
         if source == "librespot" and not bool(self._controller._config.get("librespot_consented")):
             if not self._confirm_librespot_consent():
                 # Declined: revert to the previous selection without saving.
@@ -2464,13 +2524,27 @@ class SettingsPanel(QWidget):
                 self._source_cb.setCurrentIndex(self._source_index)
                 self._source_cb.blockSignals(False)
                 self._sync_lossless_enabled()
+                self._sync_fallback_choices()
                 self._sync_spotify_card_enabled()
                 self._sync_youtube_card_enabled()
                 return
             self._save("librespot_consented", True)
         self._source_index = index
         self._save("download_source", source)
+        if source == "youtube":
+            self._save("fallback_order", [])
+        elif prev_source == "youtube":
+            self._save("fallback_order", list(DEFAULT_FALLBACK_ORDER[source]))
+        elif prev_source in ("librespot", "lossless") and source in ("librespot", "lossless"):
+            allowed = set(ALLOWED_FALLBACKS[source])
+            filtered = [
+                s for s in self._controller._config.get("fallback_order", []) if s in allowed
+            ]
+            seen: set[str] = set()
+            deduped = [s for s in filtered if not (s in seen or seen.add(s))]
+            self._save("fallback_order", deduped)
         self._sync_format_choices()
+        self._sync_fallback_choices()
         self._sync_lossless_enabled()
         self._sync_spotify_card_enabled()
         self._sync_youtube_card_enabled()
@@ -2486,7 +2560,9 @@ class SettingsPanel(QWidget):
         return box.exec_() == QMessageBox.Ok
 
     def _sync_spotify_card_enabled(self):
-        self._spotify_card.setEnabled(self._current_source() == "librespot")
+        source = self._current_source()
+        chain = self._current_fallback_order()
+        self._spotify_card.setEnabled(source == "librespot" or "librespot" in chain)
 
     def _refresh_spotify_status(self):
         """Reflect login state from the presence of a cached credentials file."""
@@ -2956,12 +3032,9 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             tidal_api_url=self._config.get("tidal_api_url", ""),
             lossless_quality=self._config.get("lossless_quality", "27"),
             lossless_service_order=self._config.get("lossless_service_order", "qobuz,amazon"),
-            lossless_youtube_fallback=self._config.get("lossless_youtube_fallback", True),
+            fallback_order=self._config.get("fallback_order", []),
             flac_metadata_source=self._config.get("flac_metadata_source", "provider"),
             spotify_credentials_path=self._config.get("spotify_credentials_path", ""),
-            librespot_extended_yt_fallback=bool(
-                self._config.get("librespot_extended_yt_fallback", False)
-            ),
             spotify_client_id=self._config.get("spotify_client_id", ""),
             spotify_client_secret=self._config.get("spotify_client_secret", ""),
             youtube_cookies_file=self._config.get("youtube_cookies_file", ""),
@@ -3270,10 +3343,12 @@ class MainWindow(QMainWindow, Ui_MainWindow):
     @pyqtSlot(dict)
     def add_song_META(self, song_meta):
         # Each emit means a file finished writing -> mark the current track done.
-        # The backend sets via_youtube_fallback when it served this track from YouTube
-        # instead of native Spotify (not Premium / no native OGG / no extended cut);
-        # flag that in the History entry.
-        self._mark_track_done(via_youtube=bool(song_meta.get("via_youtube_fallback")))
+        # served_by records which source actually delivered the file; when it differs
+        # from the configured primary the History entry gets a "via X fallback" suffix.
+        self._mark_track_done(
+            served_by=song_meta.get("served_by"),
+            primary_source=song_meta.get("primary_source"),
+        )
         if self.AddMetaDataCheck.isChecked():
             meta_thread = WritingMetaTagsThread(song_meta, song_meta["file"])
             meta_thread.tags_success.connect(lambda x: self.statusMsg.setText(f"{x}"))
@@ -3333,14 +3408,15 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self._current_track_item = item
         self._current_track_label = label
 
-    def _mark_track_done(self, via_youtube=False):
+    def _mark_track_done(self, served_by=None, primary_source=None):
         if self._current_track_item is not None:
             with contextlib.suppress(RuntimeError):  # row may have been cleared mid-flight
                 self._current_track_item.setText(f"✓   {self._current_track_label}")
-            # Note a YouTube fallback in the history entry (the specific reason — not
-            # Premium / no native OGG / no extended cut — is in the status bar + console
-            # logs); native Spotify downloads have no suffix.
-            suffix = "   ·  via YouTube fallback" if via_youtube else ""
+            suffix = ""
+            if served_by and primary_source and served_by != primary_source:
+                labels = {"youtube": "YouTube", "librespot": "Spotify", "lossless": "Lossless"}
+                label = labels.get(served_by, served_by)
+                suffix = f"   ·  via {label} fallback"
             QListWidgetItem(f"✓   {self._current_track_label}{suffix}", self.historyList)
             self._current_track_item = None
 

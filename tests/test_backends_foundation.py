@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import Spotify_Downloader as sd
 import track_selectors
 from backends import AudioBackend, make_backend
+from backends.chain import FallbackChainBackend
 from backends.youtube import YouTubeBackend
 from Spotify_Downloader import MusicScraper
 
@@ -35,6 +36,15 @@ class TestMakeBackend:
 
     def test_youtube_backend_satisfies_protocol(self):
         assert isinstance(MusicScraper()._backend, AudioBackend)
+
+    def test_lossless_with_fallback_wraps_chain(self):
+        b = make_backend("lossless", scraper=MusicScraper(), fallback_order=["youtube"])
+        assert isinstance(b, FallbackChainBackend)
+        assert b.max_concurrency == 4
+
+    def test_youtube_empty_chain_stays_leaf(self):
+        b = make_backend("youtube", scraper=MusicScraper(), fallback_order=[])
+        assert isinstance(b, YouTubeBackend)
 
 
 class TestYouTubeBackendFetch:

@@ -4,8 +4,8 @@ Implements the foundation's ``AudioBackend`` protocol. Opt-in, Premium-only, and
 serialized (``max_concurrency = 1`` — a single Spotify session can't safely run
 parallel native streams; the foundation's worker clamp enforces this). Designed so
 the alpha librespot library breaking NEVER bricks Setlist: import/availability/
-premium failures degrade to the YouTube backend with a clear status, and the
-default download source stays YouTube.
+premium failures raise classified exceptions for the fallback chain to handle,
+and the default download source stays YouTube.
 """
 
 from __future__ import annotations
@@ -16,12 +16,12 @@ import random
 import threading
 import time
 
-from ..youtube import YouTubeBackend
 from . import audio, search
 from .errors import (
     LibrespotCancelled,
     LibrespotNotPremium,
     LibrespotUnavailable,
+    NoExtendedCutError,
     OggCaptureError,
 )
 from .session import LibrespotSession
@@ -39,9 +39,8 @@ class LibrespotBackend:
     # "Failed fetching audio key" / bans). Applied between tracks, not before the first.
     INTER_TRACK_JITTER_S = (0.4, 1.3)
 
-    def __init__(self, scraper, *, allow_youtube_fallback: bool = True, sleep=time.sleep):
+    def __init__(self, scraper, *, sleep=time.sleep):
         self._scraper = scraper
-        self._allow_fallback = allow_youtube_fallback
         self._sleep = sleep
         # Optional: the user's OWN Spotify app (Client-Credentials) for the extended
         # search. Its own rate-limit bucket makes /v1/search usable; without creds we
@@ -52,23 +51,25 @@ class LibrespotBackend:
         self._session: LibrespotSession | None = None
         self._session_lock = threading.Lock()
         self._served_any = False
-        self._youtube: YouTubeBackend | None = None
-        # Reliable per-fetch signal of whether THIS track was served by the YouTube
-        # fallback (read by the seam to flag History). Set per fetch(); safe because a
-        # librespot run is serialized (max_concurrency == 1).
-        self.used_youtube_fallback = False
         # Rich Spotify metadata (album, clean artists, track/disc number, cover)
         # captured from the LoadedStream.track protobuf on the last native fetch — the
         # album the spotifydown embed lacks. The seam reads this after fetch() to
-        # enrich the written tags. Same single-slot pattern as used_youtube_fallback
-        # (safe: max_concurrency == 1). None when this track fell back to YouTube
-        # (no protobuf) or the load was an episode.
+        # enrich the written tags. Same single-slot pattern (chain snapshots per-thread).
         self.last_track_metadata: dict | None = None
 
     # -- AudioBackend protocol --------------------------------------------
 
-    def fetch(self, *, track, destination, extended, audio_format, audio_quality, cancel):
-        self.used_youtube_fallback = False
+    def fetch(
+        self,
+        *,
+        track,
+        destination,
+        extended,
+        audio_format,
+        audio_quality,
+        cancel,
+        has_fallback: bool = False,
+    ):
         self.last_track_metadata = None
         # The seam hands us a ".mp3" destination; our real output is native ".ogg".
         dest_ogg = os.path.splitext(destination)[0] + ".ogg"
@@ -83,37 +84,15 @@ class LibrespotBackend:
 
         try:
             session = self._ensure_session()
-        except LibrespotUnavailable as exc:
-            return self._youtube_fallback(
-                track,
-                destination,
-                extended,
-                audio_format,
-                audio_quality,
-                cancel,
-                reason=f"Spotify backend unavailable ({exc}); falling back to YouTube",
-            )
-        # LibrespotAuthError (not logged in) propagates: the user chose librespot and
-        # must log in; a silent YouTube swap would be misleading.
+        except LibrespotUnavailable:
+            raise
 
         if session.is_known_free():
-            # Only fall back when we POSITIVELY know the account is non-Premium. An
+            # Only fail when we POSITIVELY know the account is non-Premium. An
             # inconclusive check (e.g. a 429 on the profile probe) must NOT downgrade a
             # Premium user — we attempt the native stream and let a genuinely free
-            # account fail per-track into the YouTube fallback below.
-            return self._youtube_fallback(
-                track,
-                destination,
-                extended,
-                audio_format,
-                audio_quality,
-                cancel,
-                reason="Spotify account is not Premium (320k OGG needs Premium); "
-                "falling back to YouTube",
-                error_if_no_fallback=LibrespotNotPremium(
-                    "Spotify Premium is required for native 320k OGG"
-                ),
-            )
+            # account fail per-track.
+            raise LibrespotNotPremium("Spotify Premium is required for native 320k OGG")
 
         base62 = track.id
         used_extended = False
@@ -145,24 +124,8 @@ class LibrespotBackend:
             if chosen:
                 base62 = chosen
                 used_extended = True
-            elif (
-                not search_failed
-                and self._allow_fallback
-                and getattr(self._scraper, "librespot_extended_yt_fallback", False)
-            ):
-                # No extended cut on Spotify and the user opted to look on YouTube
-                # (which often hosts the 12"/extended mix). Delegate to the YouTube
-                # backend's own extended search rather than the original Spotify track.
-                return self._youtube_fallback(
-                    track,
-                    destination,
-                    True,  # keep extended mode on for YouTube's extended search
-                    audio_format,
-                    audio_quality,
-                    cancel,
-                    reason=f"No extended mix on Spotify for '{track.title}'; "
-                    "searching YouTube instead",
-                )
+            elif not search_failed and has_fallback:
+                raise NoExtendedCutError(f"No extended mix on Spotify for '{track.title}'")
             # else: no extended cut found -> stream the original Spotify track
             # natively (used_extended stays False, so the file isn't mislabeled).
 
@@ -175,18 +138,8 @@ class LibrespotBackend:
                 on_status=self._emit,
                 on_metadata=self._capture_metadata,
             )
-        except OggCaptureError as exc:
-            return self._youtube_fallback(
-                track,
-                destination,
-                extended,
-                audio_format,
-                audio_quality,
-                cancel,
-                reason=f"No native Spotify OGG for '{track.title}' ({exc}); "
-                "falling back to YouTube",
-                error_if_no_fallback=exc,
-            )
+        except OggCaptureError:
+            raise
         return final_path, "ogg", used_extended
 
     # -- internals ---------------------------------------------------------
@@ -238,42 +191,6 @@ class LibrespotBackend:
                 return
             self._sleep(min(step, deadline))
             deadline -= step
-
-    def _youtube_fallback(
-        self,
-        track,
-        destination,
-        extended,
-        audio_format,
-        audio_quality,
-        cancel,
-        *,
-        reason: str,
-        error_if_no_fallback: Exception | None = None,
-    ):
-        """Delegate ONE track to YouTube so an alpha-lib/premium/availability failure
-        never bricks the run. If fallback is disabled, raise the underlying error."""
-        if not self._allow_fallback:
-            raise error_if_no_fallback or OggCaptureError(reason)
-        self.used_youtube_fallback = True  # reliable signal for the seam / History
-        # This source's format is pinned to its native "ogg"; honoring that here
-        # would force a pointless extra lossy generation (YouTube's stream ->
-        # Vorbis) that also breaks on ffmpeg builds without libvorbis. Mirror
-        # the Real FLAC fallback instead: deliver MP3 320k, labelled as such.
-        if audio_format not in ("mp3", "m4a", "opus"):
-            audio_format, audio_quality = "mp3", "320"
-            reason += " (MP3 320k)"
-        self._emit(reason)
-        if self._youtube is None:
-            self._youtube = YouTubeBackend(self._scraper)
-        return self._youtube.fetch(
-            track=track,
-            destination=destination,
-            extended=extended,
-            audio_format=audio_format,
-            audio_quality=audio_quality,
-            cancel=cancel,
-        )
 
     def _capture_metadata(self, meta: dict | None) -> None:
         """Stash the protobuf metadata from the just-captured stream for the seam."""

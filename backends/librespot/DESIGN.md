@@ -83,15 +83,22 @@ so the scan is a no-op and never reaches into audio data. Loop terminates on emp
 
 ## Error taxonomy + graceful degradation
 
-- `LibrespotUnavailable` (adapter import failed) — raised by session build. backend.fetch catches
-  it and (if YouTube fallback enabled) delegates ONE track to `YouTubeBackend(scraper).fetch(...)`
-  with a clear `error_signal` note; the alpha lib breaking never bricks Setlist (YouTube stays
-  default source).
-- `LibrespotAuthError` / not premium — surfaced as a friendly per-track error; UI also gates.
+- `LibrespotUnavailable` (adapter import failed) — raised by session build and re-raised by
+  backend.fetch as a classified "advance" error: the user's `fallback_order` chain
+  (`backends/chain.py`) decides whether the track diverts to another source, so the alpha lib
+  breaking never bricks Setlist (YouTube stays default source).
+- `LibrespotAuthError` (not logged in) — always aborts the track, even with a fallback chain
+  configured (a silent source swap would be misleading); friendly per-track error, UI also gates.
+- `LibrespotNotPremium` (positively-known free account) — classified "advance" error for the chain.
 - Transient `Failed fetching audio key` / load errors — retry 3x exponential backoff (10s base,
   30s cap, mirrors Rust ref), then a friendly error via `_get_user_friendly_error`.
 - VERY_HIGH vorbis unavailable for a track -> retry HIGH (still native .ogg). If both unavailable
-  -> per-track YouTube fallback (goal §10.5 "graceful HIGH-then-YouTube fallback").
+  -> `OggCaptureError`, another "advance" error for the chain (goal §10.5's graceful degradation,
+  now user-ordered instead of hardwired to YouTube).
+- `NoExtendedCutError` — extended-mix mode only: the extended search succeeded but found no
+  extended cut AND a fallback step exists (`has_fallback=True`); the chain advances with
+  `extended=True` so the next source runs its own extended search. With no fallback configured
+  the backend streams the original Spotify track natively instead (file left unmarked).
 
 ## Threading / cancel
 
