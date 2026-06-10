@@ -80,7 +80,7 @@ class TestQobuzSignature:
             "track/search", params, "1700000000", C.QOBUZ_DEFAULT_APP_SECRET
         )
         assert payload == (
-            "tracksearchlimit1queryUSUM71703861" "1700000000" + C.QOBUZ_DEFAULT_APP_SECRET
+            "tracksearchlimit1queryUSUM717038611700000000" + C.QOBUZ_DEFAULT_APP_SECRET
         )
         assert qobuz.request_signature(
             "track/search", params, "1700000000", C.QOBUZ_DEFAULT_APP_SECRET

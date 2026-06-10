@@ -783,7 +783,9 @@ class MusicScraper(QThread):
                     self.dlprogress_signal.emit(progress)
         return destination
 
-    def _enrich_song_meta(self, song_meta: dict, track_id: str = "", *, fresh_fetch: bool = True) -> None:
+    def _enrich_song_meta(
+        self, song_meta: dict, track_id: str = "", *, fresh_fetch: bool = True
+    ) -> None:
         """Enrich ``song_meta`` with rich metadata for the active backend.
 
         Always strips the embed's non-breaking-space artist join. Real-FLAC backends

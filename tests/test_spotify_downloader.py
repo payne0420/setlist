@@ -744,7 +744,7 @@ class TestExtendedMixDownload:
         extended_url = "https://www.youtube.com/watch?v=extended"
 
         mock_select = MagicMock(
-            side_effect=lambda *_a, **kw: (extended_url if kw.get("prefer_extended") else None)
+            side_effect=lambda *_a, **kw: extended_url if kw.get("prefer_extended") else None
         )
 
         with (
@@ -986,14 +986,14 @@ class TestExtendedMixFilenameTitle:
         extended = self._scraper(extended_mix=True)
         extended_display = self._display_title(extended, "Broken Pieces")
         extended_filename = (
-            f"{extended.sanitize_text(extended_display)} - " f"{extended.sanitize_text(artist)}.mp3"
+            f"{extended.sanitize_text(extended_display)} - {extended.sanitize_text(artist)}.mp3"
         )
         assert extended_filename == "Broken Pieces (Extended Mix) - Paccu.mp3"
 
         normal = self._scraper(extended_mix=False)
         normal_display = self._display_title(normal, "Broken Pieces")
         normal_filename = (
-            f"{normal.sanitize_text(normal_display)} - " f"{normal.sanitize_text(artist)}.mp3"
+            f"{normal.sanitize_text(normal_display)} - {normal.sanitize_text(artist)}.mp3"
         )
         assert normal_filename == "Broken Pieces - Paccu.mp3"
 
@@ -1364,7 +1364,7 @@ class TestParallelDownloads:
                 iter_threads.append(threading.get_ident())
                 yield self._make_track(f"id{i}", f"Song {i}")
 
-        scraper.download_track_audio = lambda _q, d, **_kw: (open(d, "wb").close() or (d, False))
+        scraper.download_track_audio = lambda _q, d, **_kw: open(d, "wb").close() or (d, False)
         mock_api = MagicMock()
         meta = MagicMock()
         meta.name = "T"
@@ -1503,7 +1503,7 @@ class TestParallelDownloads:
             setattr(scraper, sig, MagicMock())
 
         tracks = [self._make_track("id1", "Song A")]
-        scraper.download_track_audio = lambda _q, d, **_kw: (open(d, "wb").close() or (d, False))
+        scraper.download_track_audio = lambda _q, d, **_kw: open(d, "wb").close() or (d, False)
         mock_api = MagicMock()
         meta = MagicMock()
         meta.name = "T"
@@ -1617,7 +1617,7 @@ class TestParallelDownloads:
             setattr(scraper, sig, MagicMock())
 
         tracks = [self._make_track(f"id{i}", f"Song {i}") for i in range(4)]
-        scraper.download_track_audio = lambda _q, d, **_kw: (open(d, "wb").close() or (d, False))
+        scraper.download_track_audio = lambda _q, d, **_kw: open(d, "wb").close() or (d, False)
 
         mock_api = MagicMock()
         meta = MagicMock()
@@ -1660,7 +1660,7 @@ class TestParallelDownloads:
             setattr(scraper, sig, MagicMock())
 
         tracks = [self._make_track(f"id{i}", f"Song {i}") for i in range(4)]
-        scraper.download_track_audio = lambda _q, d, **_kw: (open(d, "wb").close() or (d, False))
+        scraper.download_track_audio = lambda _q, d, **_kw: open(d, "wb").close() or (d, False)
 
         mock_api = MagicMock()
         meta = MagicMock()
@@ -1740,7 +1740,7 @@ class TestCoverEnrichment:
 
         scraper = MusicScraper()
         self._stub_scraper_signals(scraper)
-        scraper.download_track_audio = lambda _q, d, **_kw: (open(d, "wb").close() or (d, False))
+        scraper.download_track_audio = lambda _q, d, **_kw: open(d, "wb").close() or (d, False)
 
         mock_api = MagicMock()
         enriched = self._track(cover="https://real/cover.jpg", release_date="2024-06-01")
@@ -1764,7 +1764,7 @@ class TestCoverEnrichment:
 
         scraper = MusicScraper()
         self._stub_scraper_signals(scraper)
-        scraper.download_track_audio = lambda _q, d, **_kw: (open(d, "wb").close() or (d, False))
+        scraper.download_track_audio = lambda _q, d, **_kw: open(d, "wb").close() or (d, False)
 
         mock_api = MagicMock()
         scraper.spotifydown_api = mock_api
@@ -1783,7 +1783,7 @@ class TestCoverEnrichment:
 
         scraper = MusicScraper()
         self._stub_scraper_signals(scraper)
-        scraper.download_track_audio = lambda _q, d, **_kw: (open(d, "wb").close() or (d, False))
+        scraper.download_track_audio = lambda _q, d, **_kw: open(d, "wb").close() or (d, False)
 
         mock_api = MagicMock()
         mock_api.get_track.side_effect = SpotifyDownAPIError("offline")
@@ -1821,7 +1821,7 @@ class TestCoverEnrichment:
 
         scraper = MusicScraper()
         self._stub_scraper_signals(scraper)
-        scraper.download_track_audio = lambda _q, d, **_kw: (open(d, "wb").close() or (d, False))
+        scraper.download_track_audio = lambda _q, d, **_kw: open(d, "wb").close() or (d, False)
 
         mock_api = MagicMock()
         enriched = self._track(cover="https://real/cover.jpg", release_date="2020-01-01")
@@ -1871,7 +1871,7 @@ class TestTrackNumberMetadata:
             "count_updated",
         ):
             setattr(scraper, sig, MagicMock())
-        scraper.download_track_audio = lambda _q, d, **_kw: (open(d, "wb").close() or (d, False))
+        scraper.download_track_audio = lambda _q, d, **_kw: open(d, "wb").close() or (d, False)
 
         captured = []
         scraper.add_song_meta.emit.side_effect = lambda meta: captured.append(meta)
