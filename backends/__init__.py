@@ -14,7 +14,7 @@ from typing import Callable, Protocol, runtime_checkable
 # download_source values understood by make_backend. Follow-on goals append
 # their own ("lossless", "librespot"); load_config uses this as its whitelist so
 # new sources are accepted automatically once registered.
-KNOWN_DOWNLOAD_SOURCES = ("youtube",)
+KNOWN_DOWNLOAD_SOURCES = ("youtube", "librespot")
 DEFAULT_DOWNLOAD_SOURCE = "youtube"
 
 
@@ -56,13 +56,22 @@ def make_backend(download_source: str, *, scraper) -> AudioBackend:
     """
     from .youtube import YouTubeBackend
 
+    if download_source == "librespot":
+        # Import lazily so the alpha librespot stack loads ONLY when selected. The
+        # backend module itself imports nothing heavy at module scope (the alpha
+        # lib is imported on first fetch), so this import can't fail just because
+        # librespot isn't installed; a genuine import error degrades to YouTube
+        # rather than leaving the app with no backend.
+        try:
+            from .librespot.backend import LibrespotBackend
+        except ImportError as exc:  # pragma: no cover - defensive
+            print(f"[*] librespot backend unavailable ({exc}); falling back to YouTube")
+            return YouTubeBackend(scraper)
+        return LibrespotBackend(scraper)
     if download_source == "youtube":
         return YouTubeBackend(scraper)
     # Follow-on goals register here, e.g.:
     #   if download_source == "lossless":
     #       from .real_flac import RealFlacBackend
     #       return RealFlacBackend(scraper)
-    #   if download_source == "librespot":
-    #       from .librespot.backend import LibrespotBackend
-    #       return LibrespotBackend(scraper)
     return YouTubeBackend(scraper)

@@ -4,6 +4,14 @@ PyQt5>=5.15.9
 requests>=2.32.2
 yt-dlp>=2024.8.6
 
+# Opt-in librespot backend (Spotify native ~320k OGG). Alpha library, PINNED to a
+# known-good commit and contained behind backends/librespot/_librespot/ so an upstream
+# break degrades to YouTube rather than bricking Setlist. Pure Python — no Rust
+# toolchain, no extra native binary; ffmpeg is NOT needed for the OGG path.
+librespot @ git+https://github.com/kokarare1212/librespot-python.git@18104622b3be02062f1f8abe8dafc396413e9784
+# librespot's own deps (auto-installed; listed for reference + PyInstaller hiddenimports):
+#   defusedxml protobuf==3.20.1 pycryptodomex pyogg requests websocket-client zeroconf
+
 # transitive (auto-installed but listed for reference)
 certifi>=2023.7.22
 charset-normalizer>=3.2.0

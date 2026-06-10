@@ -1926,6 +1926,39 @@ class TestTrackNumberMetadata:
         calls = [c for c in mock_easy.__setitem__.call_args_list if c.args[0] == "tracknumber"]
         assert len(calls) == 0
 
+    def test_writingmetatagsthread_writes_discnumber(self, tmp_path, mocker):
+        """discNumber is written to ID3 (parity with the librespot .ogg path)."""
+        from Spotify_Downloader import WritingMetaTagsThread
+
+        mock_easy = mocker.MagicMock()
+        mocker.patch("Spotify_Downloader.EasyID3", return_value=mock_easy)
+        mocker.patch(
+            "Spotify_Downloader.requests.get",
+            return_value=mocker.MagicMock(status_code=200, content=b""),
+        )
+        tags = {"title": "T", "artists": "A", "album": "Al", "trackNumber": 2, "discNumber": 1}
+        thread = WritingMetaTagsThread(tags, str(tmp_path / "fake.mp3"))
+        thread.tags_success = MagicMock()
+        thread.run()
+        mock_easy.__setitem__.assert_any_call("discnumber", "1")
+
+    def test_writingmetatagsthread_skips_empty_album(self, tmp_path, mocker):
+        """An empty album must NOT be written (so a re-tag can't erase a real album)."""
+        from Spotify_Downloader import WritingMetaTagsThread
+
+        mock_easy = mocker.MagicMock()
+        mocker.patch("Spotify_Downloader.EasyID3", return_value=mock_easy)
+        mocker.patch(
+            "Spotify_Downloader.requests.get",
+            return_value=mocker.MagicMock(status_code=200, content=b""),
+        )
+        tags = {"title": "T", "artists": "A", "album": "", "trackNumber": 1}
+        thread = WritingMetaTagsThread(tags, str(tmp_path / "fake.mp3"))
+        thread.tags_success = MagicMock()
+        thread.run()
+        album_calls = [c for c in mock_easy.__setitem__.call_args_list if c.args[0] == "album"]
+        assert album_calls == []
+
 
 class TestFilenameOrder:
     """Tests for artist_first filename ordering."""

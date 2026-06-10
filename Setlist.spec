@@ -22,6 +22,16 @@ block_cipher = None
 is_mac = sys.platform == 'darwin'
 is_windows = sys.platform == 'win32'
 
+# Opt-in librespot backend: the alpha lib is imported lazily and leans on generated
+# protobuf (_pb2) submodules + several third-party deps, which PyInstaller's static
+# analysis can miss. Collect every librespot submodule (best-effort: empty if the lib
+# isn't installed at build time, e.g. a YouTube-only build).
+try:
+    from PyInstaller.utils.hooks import collect_submodules
+    librespot_hiddenimports = collect_submodules('librespot')
+except Exception:
+    librespot_hiddenimports = []
+
 # Windows version info (shows in Properties > Details)
 win_version_info = None
 if is_windows:
@@ -88,9 +98,18 @@ a = Analysis(
         'mutagen',
         'mutagen.id3',
         'mutagen.easyid3',
+        'mutagen.flac',
+        'mutagen.mp4',
+        'mutagen.oggvorbis',  # librespot OGG tag writer
         'yt_dlp',
         'requests',
-    ],
+        # librespot backend third-party deps (lazy/dynamic imports PyInstaller can miss)
+        'Cryptodome',
+        'google.protobuf',
+        'websocket',
+        'defusedxml',
+        'defusedxml.ElementTree',
+    ] + librespot_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

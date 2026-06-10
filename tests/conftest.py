@@ -2,7 +2,25 @@
 
 from __future__ import annotations
 
-import pytest  # noqa: F401
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_live_librespot_metadata(monkeypatch):
+    """Never open a real librespot session for metadata enrichment during tests.
+
+    ``MusicScraper`` now creates a ``LibrespotMetadataService`` that, on the YouTube
+    path, lazily connects a metadata-only librespot session from the cached credentials
+    on this machine — which would make seam tests hit the live Spotify account (slow,
+    flaky, account-touching). Forcing ``has_credentials`` False makes the service
+    self-disable (``get`` returns None), so unenriched tests stay offline and fast.
+    Tests that exercise the service inject a fake session via ``session_provider`` or
+    re-monkeypatch this within the test, so this never blocks real coverage.
+    """
+    from backends.librespot.session import LibrespotSession
+
+    monkeypatch.setattr(LibrespotSession, "has_credentials", lambda _self: False)
+
 
 # Sample Spotify embed page HTML with __NEXT_DATA__
 SAMPLE_EMBED_HTML = """

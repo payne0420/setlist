@@ -127,13 +127,21 @@ def get_ffmpeg_path():
 
 
 # Supported output formats. "lossy" means quality/bitrate applies; "lossless"
-# means the ffmpeg postprocessor ignores preferredquality.
+# means the ffmpeg postprocessor ignores preferredquality. "codec" (optional) is
+# the yt-dlp FFmpegExtractAudio preferredcodec when it differs from the key
+# (yt-dlp names Ogg Vorbis "vorbis", not "ogg").
+#
+# "ogg" exists primarily for the librespot backend, whose native ~320k OGG is
+# already the FINAL file and never touches the yt-dlp transcode/quality path. If
+# a user instead selects ogg with the YouTube source, the "vorbis" codec mapping
+# keeps that path working (yt-dlp transcodes to .ogg) rather than erroring.
 SUPPORTED_FORMATS = {
     "mp3": {"ext": "mp3", "lossy": True},
     "m4a": {"ext": "m4a", "lossy": True},
     "opus": {"ext": "opus", "lossy": True},
     "flac": {"ext": "flac", "lossy": False},
     "wav": {"ext": "wav", "lossy": False},
+    "ogg": {"ext": "ogg", "lossy": True, "codec": "vorbis"},
 }
 SUPPORTED_QUALITIES = ("128", "192", "256", "320")
 
@@ -178,6 +186,19 @@ def load_config() -> dict:
         "max_track_mb": 0,
         "artist_first": False,
         "download_source": DEFAULT_DOWNLOAD_SOURCE,
+        # librespot backend: path to the cached credentials.json (a reusable
+        # token, never the password) and the one-time consent acknowledgement.
+        "spotify_credentials_path": "",
+        "librespot_consented": False,
+        # Optional Spotify Developer app (Client-Credentials) used ONLY for the
+        # extended-mix /v1/search. The user's own app has its own rate-limit bucket,
+        # avoiding the hard throttle/ban on librespot's shared keymaster token.
+        "spotify_client_id": "",
+        "spotify_client_secret": "",
+        # In extended-mix mode, when Spotify has no extended/club mix for a track,
+        # fall back to YouTube (which often hosts the 12"/extended cut) instead of
+        # streaming the original Spotify track. Off by default.
+        "librespot_extended_yt_fallback": False,
     }
     try:
         with open(_config_path(), encoding="utf-8") as f:
@@ -247,6 +268,10 @@ class MusicScraper(QThread):
         max_track_mb: int = 0,
         artist_first: bool = False,
         download_source: str = DEFAULT_DOWNLOAD_SOURCE,
+        spotify_credentials_path: str = "",
+        librespot_extended_yt_fallback: bool = False,
+        spotify_client_id: str = "",
+        spotify_client_secret: str = "",
     ):
         super().__init__()
         self.counter = 0  # Initialize counter to zero
@@ -285,7 +310,31 @@ class MusicScraper(QThread):
         # Pluggable audio source (YouTube by default). The fetch seam in
         # _download_one_track / scrape_track routes through this.
         self.download_source = download_source
+        # Path to the cached librespot credentials.json. Consumed lazily by the
+        # librespot backend at fetch time; "" lets it use its default path. Set
+        # before make_backend so the backend can read it off the scraper.
+        self.spotify_credentials_path = spotify_credentials_path
+        # Extended-mix mode: if Spotify has no extended cut, let the librespot backend
+        # fall back to YouTube (which often hosts it) rather than the original track.
+        self.librespot_extended_yt_fallback = bool(librespot_extended_yt_fallback)
+        # User's own Spotify app credentials for the extended-mix search (see
+        # backends.librespot.webapi). Read by the librespot backend below; set before
+        # make_backend so the backend can build its token provider off the scraper.
+        self.spotify_client_id = spotify_client_id or ""
+        self.spotify_client_secret = spotify_client_secret or ""
         self._backend = make_backend(download_source, scraper=self)
+        # Rich-metadata resolver for the NON-librespot path. The librespot streaming
+        # path gets album/track-number/clean-artists from the captured protobuf; the
+        # YouTube path can't get those from the no-auth embed, so it falls back to a
+        # metadata-only librespot Mercury fetch (best-effort: degrades to embed data if
+        # the user isn't logged in). It reuses the librespot backend's live session
+        # when one exists (YouTube-fallback tracks) instead of opening a second login.
+        from backends.librespot.metadata_service import LibrespotMetadataService
+
+        self._metadata_service = LibrespotMetadataService(
+            self.spotify_credentials_path,
+            session_provider=lambda: getattr(self._backend, "raw_session", None),
+        )
 
     def is_cancelled(self) -> bool:
         """Check if cancellation has been requested."""
@@ -308,6 +357,18 @@ class MusicScraper(QThread):
             or "unavailable" in error_text
         ):
             return f"'{track_title}' not found on YouTube"
+        # librespot backend cases (message-matched so this stays decoupled from the
+        # backend module). Order matters: most specific first.
+        if "premium" in error_text:
+            return "Spotify Premium required for native 320k OGG"
+        if "not logged in" in error_text or "no cached credentials" in error_text:
+            return "Log in to Spotify in Settings to use this source"
+        if "audio key" in error_text:
+            return f"Spotify rate-limited '{track_title}' - retrying..."
+        if "oggs" in error_text or "native ogg" in error_text:
+            return f"No native Spotify stream for '{track_title}'"
+        if "librespot" in error_text:
+            return f"Spotify backend error for '{track_title}'"
         return f"Error: {str(error)[:50]}"
 
     def ensure_spotifydown_api(self):
@@ -512,7 +573,7 @@ class MusicScraper(QThread):
         output_template = base + ".%(ext)s"
         postprocessor = {
             "key": "FFmpegExtractAudio",
-            "preferredcodec": fmt,
+            "preferredcodec": SUPPORTED_FORMATS[fmt].get("codec", fmt),
         }
         if is_lossy:
             postprocessor["preferredquality"] = self.audio_quality
@@ -585,17 +646,27 @@ class MusicScraper(QThread):
             return final_path, display_title
         # extended mode but fell back to the original -> drop the (Extended Mix) marker.
         # Build the unmarked name via _format_track_filename so it honors artist_first.
+        # _format_track_filename always yields ".mp3"; preserve the real container of
+        # the downloaded file (e.g. ".ogg" from librespot, ".flac" from YouTube) so the
+        # rename doesn't mislabel the file and break the extension-keyed tag writer.
+        real_ext = os.path.splitext(final_path)[1]
+
+        def _with_real_ext(name: str) -> str:
+            return os.path.splitext(name)[0] + real_ext
+
         sanitized_title = self.sanitize_text(track_title)
-        unmarked = os.path.join(
-            folder, self._format_track_filename(sanitized_title, sanitized_artists)
+        unmarked = _with_real_ext(
+            os.path.join(folder, self._format_track_filename(sanitized_title, sanitized_artists))
         )
         if unmarked != final_path:
             if os.path.exists(unmarked):
-                unmarked = os.path.join(
-                    folder,
-                    self._format_track_filename(
-                        sanitized_title, sanitized_artists, suffix=f" [{track_id}]"
-                    ),
+                unmarked = _with_real_ext(
+                    os.path.join(
+                        folder,
+                        self._format_track_filename(
+                            sanitized_title, sanitized_artists, suffix=f" [{track_id}]"
+                        ),
+                    )
                 )
             try:
                 os.rename(final_path, unmarked)
@@ -603,6 +674,53 @@ class MusicScraper(QThread):
             except OSError:
                 pass
         return final_path, track_title
+
+    def _enrich_song_meta(self, song_meta: dict, track_id: str = "") -> None:
+        """Enrich ``song_meta`` with the real Spotify ``Metadata.Track`` for the track.
+
+        The seam builds ``song_meta`` from the spotifydown embed (``TrackInfo``), which
+        has **no album / no track-or-disc number** for the playlist & single-track paths
+        and joins artists with a non-breaking space. The real metadata comes from one of
+        two sources, both yielding the same fields (album, clean artists, track/disc
+        number, release date, album-art URL):
+
+        * **librespot streaming path** — the protobuf captured while streaming audio,
+          on ``backend.last_track_metadata`` (free, no extra request).
+        * **YouTube path** (and librespot YouTube-fallback tracks) — a metadata-only
+          librespot Mercury fetch via :class:`LibrespotMetadataService` (uses the cached
+          Spotify login; the no-auth embed simply doesn't carry album/track number).
+
+        Both are best-effort: with no logged-in session the service returns None and the
+        embed-derived ``song_meta`` stands (we still clean the artist nbsp below). Title
+        is deliberately NOT overridden — the seam owns it (extended-mix marker,
+        _meta_title).
+
+        Note on ``trackNumber``: the embed default is the 1-based PLAYLIST position; the
+        real metadata overrides it with the ALBUM track number (and adds ``discNumber``).
+        That's deliberate — now that the real per-track album IS written, a player
+        grouping by album needs the album's own track numbers (playlist-position numbering
+        would render an album with tracks numbered, say, 47/112/250)."""
+        # Universal cleanup: strip the non-breaking space the embed leaks into artists,
+        # so even tracks with no rich-metadata source still get a clean artist tag.
+        artists = song_meta.get("artists")
+        if isinstance(artists, str) and "\xa0" in artists:
+            song_meta["artists"] = artists.replace("\xa0", " ")
+
+        rich = getattr(self._backend, "last_track_metadata", None)
+        if not rich and track_id:
+            service = getattr(self, "_metadata_service", None)
+            if service is not None:
+                rich = service.get(track_id)
+        if not rich:
+            return
+        for key in ("album", "artists", "trackNumber", "discNumber", "cover"):
+            value = rich.get(key)
+            if value:
+                song_meta[key] = value
+        # releaseDate is filled only when the embed had none, to avoid changing an
+        # already-populated date (e.g. for an extended cut found under a different id).
+        if rich.get("releaseDate") and not song_meta.get("releaseDate"):
+            song_meta["releaseDate"] = rich["releaseDate"]
 
     def download_http_file(self, url, destination):
         response = self.session.get(url, stream=True, timeout=60)
@@ -719,7 +837,7 @@ class MusicScraper(QThread):
                 return None
 
             try:
-                final_path, _actual_ext, used_extended = self._backend.fetch(
+                final_path, actual_ext, used_extended = self._backend.fetch(
                     track=track,
                     destination=filepath,
                     extended=self.extended_mix,
@@ -756,6 +874,13 @@ class MusicScraper(QThread):
             self._record_in_manifest(track.id, final_path)
             song_meta["title"] = meta_title
             song_meta["file"] = final_path
+            song_meta["actual_ext"] = actual_ext  # real container written (e.g. "ogg")
+            # Reliable provenance flag (set by the backend) so History can mark tracks
+            # that fell back to YouTube — independent of the file extension.
+            song_meta["via_youtube_fallback"] = getattr(
+                self._backend, "used_youtube_fallback", False
+            )
+            self._enrich_song_meta(song_meta, track.id)
             self.add_song_meta.emit(song_meta)
             self._finish_track_ui(ok=True)
             return None
@@ -908,7 +1033,9 @@ class MusicScraper(QThread):
         # Clamp to what the active backend can safely run in parallel (e.g. a
         # single-session backend declares max_concurrency = 1). YouTube = 4, so
         # this is a no-op for the default source.
-        worker_count = min(worker_count, getattr(self._backend, "max_concurrency", self.MAX_WORKERS))
+        worker_count = min(
+            worker_count, getattr(self._backend, "max_concurrency", self.MAX_WORKERS)
+        )
         self._parallel_mode = worker_count > 1
 
         if worker_count == 1:
@@ -1027,7 +1154,7 @@ class MusicScraper(QThread):
 
         # Download via the configured backend (YouTube by default).
         try:
-            final_path, _actual_ext, used_extended = self._backend.fetch(
+            final_path, actual_ext, used_extended = self._backend.fetch(
                 track=track,
                 destination=filepath,
                 extended=self.extended_mix,
@@ -1057,6 +1184,9 @@ class MusicScraper(QThread):
         )
         song_meta["title"] = meta_title
         song_meta["file"] = final_path
+        song_meta["actual_ext"] = actual_ext
+        song_meta["via_youtube_fallback"] = getattr(self._backend, "used_youtube_fallback", False)
+        self._enrich_song_meta(song_meta, track.id)
         self.add_song_meta.emit(song_meta)
         self.increment_counter()
         self.dlprogress_signal.emit(100)
@@ -1092,6 +1222,10 @@ class ScraperThread(QThread):
         max_track_mb: int = 0,
         artist_first: bool = False,
         download_source: str = DEFAULT_DOWNLOAD_SOURCE,
+        spotify_credentials_path: str = "",
+        librespot_extended_yt_fallback: bool = False,
+        spotify_client_id: str = "",
+        spotify_client_secret: str = "",
     ):
         super().__init__()
         self.spotify_link = spotify_link
@@ -1107,6 +1241,10 @@ class ScraperThread(QThread):
             max_track_mb=max_track_mb,
             artist_first=artist_first,
             download_source=download_source,
+            spotify_credentials_path=spotify_credentials_path,
+            librespot_extended_yt_fallback=librespot_extended_yt_fallback,
+            spotify_client_id=spotify_client_id,
+            spotify_client_secret=spotify_client_secret,
         )
         # Capture the terminal status string synchronously IN the worker thread.
         # PlaylistCompleted is emitted from run()'s thread; a DirectConnection
@@ -1138,6 +1276,20 @@ class ScraperThread(QThread):
             self.progress_update.emit(f"{e}")
             self._last_message = str(e)
             status = CANCELLED if self._cancel_event.is_set() else FAILED
+        finally:
+            # Tear down anything holding an open connection (the librespot streaming
+            # session and/or the metadata-only service session) so a finished/cancelled
+            # item leaves nothing behind. Both are best-effort and guarded; YouTube's
+            # backend has no close().
+            for owner, attr in (
+                (getattr(self.scraper, "_backend", None), "close"),
+                (getattr(self.scraper, "_metadata_service", None), "close"),
+            ):
+                closer = getattr(owner, attr, None)
+                if callable(closer):
+                    # teardown is best-effort; never let it mask the item's real outcome
+                    with contextlib.suppress(Exception):
+                        closer()
         self.item_finished.emit(status, self._last_message)
 
 
@@ -1159,11 +1311,18 @@ def _write_metadata_mp3(filename: str, tags: dict, cover_bytes: bytes | None) ->
     audio = EasyID3(filename)
     audio["title"] = tags.get("title", "")
     audio["artist"] = tags.get("artists", "")
-    audio["album"] = tags.get("album", "")
+    album = tags.get("album", "")
+    if album:
+        # Skip an empty album so a re-tag (where the rich-metadata source was
+        # unavailable) never erases an album written on the first download.
+        audio["album"] = album
     audio["date"] = tags.get("releaseDate", "")
     track_num = tags.get("trackNumber") or 0
     if track_num:
         audio["tracknumber"] = str(track_num)
+    disc_num = tags.get("discNumber") or 0
+    if disc_num:
+        audio["discnumber"] = str(disc_num)
     audio.save()
     if cover_bytes:
         id3 = ID3(filename)
@@ -1178,13 +1337,18 @@ def _write_metadata_m4a(filename: str, tags: dict, cover_bytes: bytes | None) ->
     audio = MP4(filename)
     audio["\xa9nam"] = tags.get("title", "")
     audio["\xa9ART"] = tags.get("artists", "")
-    audio["\xa9alb"] = tags.get("album", "")
+    album = tags.get("album", "")
+    if album:  # don't erase an existing album on a re-tag (see _write_metadata_mp3)
+        audio["\xa9alb"] = album
     date = tags.get("releaseDate", "")
     if date:
         audio["\xa9day"] = date
     track_num = tags.get("trackNumber") or 0
     if track_num:
         audio["trkn"] = [(int(track_num), 0)]
+    disc_num = tags.get("discNumber") or 0
+    if disc_num:
+        audio["disk"] = [(int(disc_num), 0)]
     if cover_bytes:
         audio["covr"] = [MP4Cover(cover_bytes, imageformat=MP4Cover.FORMAT_JPEG)]
     audio.save()
@@ -1197,13 +1361,18 @@ def _write_metadata_flac(filename: str, tags: dict, cover_bytes: bytes | None) -
     audio = FLAC(filename)
     audio["title"] = tags.get("title", "")
     audio["artist"] = tags.get("artists", "")
-    audio["album"] = tags.get("album", "")
+    album = tags.get("album", "")
+    if album:  # don't erase an existing album on a re-tag (see _write_metadata_mp3)
+        audio["album"] = album
     date = tags.get("releaseDate", "")
     if date:
         audio["date"] = date
     track_num = tags.get("trackNumber") or 0
     if track_num:
         audio["tracknumber"] = str(track_num)
+    disc_num = tags.get("discNumber") or 0
+    if disc_num:
+        audio["discnumber"] = str(disc_num)
     if cover_bytes:
         pic = Picture()
         pic.type = 3  # Front cover
@@ -1214,10 +1383,54 @@ def _write_metadata_flac(filename: str, tags: dict, cover_bytes: bytes | None) -
     audio.save()
 
 
+def _write_metadata_ogg(filename: str, tags: dict, cover_bytes: bytes | None) -> None:
+    """Write Vorbis comments + embedded cover art to an Ogg Vorbis file.
+
+    Used by the librespot backend's native ~320k .ogg output. Ogg Vorbis carries
+    cover art as a base64-encoded FLAC ``METADATA_BLOCK_PICTURE`` inside a Vorbis
+    comment (there is no APIC frame like ID3), so the picture is built with
+    mutagen's FLAC Picture and base64-embedded.
+    """
+    import base64
+
+    from mutagen.flac import Picture
+    from mutagen.id3 import PictureType
+    from mutagen.oggvorbis import OggVorbis
+
+    audio = OggVorbis(filename)
+    audio["title"] = tags.get("title", "")
+    audio["artist"] = tags.get("artists", "")
+    album = tags.get("album", "")
+    if album:
+        # Only write a non-empty album. The real album comes from the librespot
+        # protobuf (the spotifydown embed has none); if it's absent — e.g. a re-tag
+        # after the backend short-circuited an already-downloaded .ogg, so there's no
+        # fresh protobuf — leave any existing album in place rather than erasing it.
+        audio["album"] = album
+    date = tags.get("releaseDate", "")
+    if date:
+        audio["date"] = str(date)
+    track_num = tags.get("trackNumber") or 0
+    if track_num:
+        audio["tracknumber"] = str(track_num)
+    disc_num = tags.get("discNumber") or 0
+    if disc_num:
+        audio["discnumber"] = str(disc_num)
+    if cover_bytes:
+        pic = Picture()
+        pic.type = PictureType.COVER_FRONT
+        pic.mime = "image/jpeg"
+        pic.desc = "Cover"
+        pic.data = cover_bytes
+        audio["metadata_block_picture"] = [base64.b64encode(pic.write()).decode("ascii")]
+    audio.save()
+
+
 _METADATA_WRITERS = {
     ".mp3": _write_metadata_mp3,
     ".m4a": _write_metadata_m4a,
     ".flac": _write_metadata_flac,
+    ".ogg": _write_metadata_ogg,
 }
 
 
@@ -1279,6 +1492,35 @@ class DownloadThumbnail(QThread):
         self.main_UI.CoverImg.show()
 
 
+class LibrespotLoginThread(QThread):
+    """Run the BLOCKING librespot OAuth login off the UI thread.
+
+    The alpha library self-hosts its own loopback server (port 5588) and blocks
+    until the browser redirect arrives. ``auth_url`` is emitted to the GUI thread so
+    the browser is opened there (never from this worker); ``finished_ok`` carries the
+    (username, product) on success and ``failed`` carries the error message.
+    """
+
+    auth_url = pyqtSignal(str)
+    finished_ok = pyqtSignal(str, str)
+    failed = pyqtSignal(str)
+
+    def __init__(self, credentials_path: str):
+        super().__init__()
+        self._credentials_path = credentials_path
+
+    def run(self):
+        try:
+            from backends.librespot.session import LibrespotSession
+
+            session = LibrespotSession(self._credentials_path or None)
+            session.connect_oauth(self.auth_url.emit)
+            self.finished_ok.emit(session.username() or "Spotify account", session.product or "")
+            session.close()
+        except Exception as exc:  # noqa: BLE001 - report any login failure to the UI
+            self.failed.emit(str(exc))
+
+
 class SettingsPanel(QWidget):
     """Settings as an embedded content page (no modal dialog).
 
@@ -1317,18 +1559,20 @@ class SettingsPanel(QWidget):
 
         # Download source. Each entry is (display label, config value). Follow-on
         # backends append their own ("lossless", "librespot") here.
-        self._source_options = [("YouTube", "youtube")]
+        self._source_options = [
+            ("YouTube", "youtube"),
+            ("Spotify (librespot 320k OGG)", "librespot"),
+        ]
         self._source_cb = theme.ThemedComboBox()
         for label, _val in self._source_options:
             self._source_cb.addItem(label)
         _cur_source = cfg.get("download_source", "youtube")
-        self._source_cb.setCurrentIndex(
-            next((i for i, (_, v) in enumerate(self._source_options) if v == _cur_source), 0)
+        self._source_index = next(
+            (i for i, (_, v) in enumerate(self._source_options) if v == _cur_source), 0
         )
+        self._source_cb.setCurrentIndex(self._source_index)
         self._source_cb.setFixedHeight(40)
-        self._source_cb.currentIndexChanged.connect(
-            lambda i: self._save("download_source", self._source_options[i][1])
-        )
+        self._source_cb.currentIndexChanged.connect(self._on_source_change)
 
         self._format_cb = theme.ThemedComboBox()
         for key in SUPPORTED_FORMATS:
@@ -1399,15 +1643,22 @@ class SettingsPanel(QWidget):
         )
         match_form.addRow("Max file size", self._field(self._max_track_mb_spin, 150))
 
+        # ---- Spotify account card (librespot backend) ----
+        self._spotify_card = self._build_spotify_card(cfg)
+
         body.addWidget(self._section("OUTPUT"))
         body.addWidget(out_card)
         body.addWidget(self._section("MATCHING"))
         body.addWidget(match_card)
+        body.addWidget(self._section("SPOTIFY ACCOUNT"))
+        body.addWidget(self._spotify_card)
         body.addStretch(1)
 
         # Apply initial dependent-state (lossless disables bitrate, etc.)
         self._on_format_change(self._format_cb.currentText())
         self._sync_extended_enabled(self._extended_mix_cb.isChecked())
+        self._refresh_spotify_status()
+        self._sync_spotify_card_enabled()
 
     def _card(self):
         card = QFrame()
@@ -1445,6 +1696,242 @@ class SettingsPanel(QWidget):
         """Lossless formats (flac/wav) ignore the bitrate selector."""
         is_lossy = SUPPORTED_FORMATS.get(fmt, {}).get("lossy", True)
         self._quality_cb.setEnabled(is_lossy)
+
+    # ---- Spotify account (librespot backend) ----------------------------
+
+    _LIBRESPOT_DISCLAIMER = (
+        "Streams Spotify's own ~320k OGG using your Premium account via a third-party "
+        "client (librespot). This may violate Spotify's Terms of Service and could put "
+        "your account at risk — a dedicated/burner Premium account is recommended. "
+        "Setlist ships no credentials; you log in with your own account. YouTube stays "
+        "the default source."
+    )
+
+    def _build_spotify_card(self, cfg):
+        """Build the SPOTIFY ACCOUNT card: login/logout, account+Premium status, the
+        credentials path, and a disclaimer. Greyed unless the source is librespot."""
+        self._spotify_creds_path = cfg.get("spotify_credentials_path") or ""
+        self._login_thread = None
+
+        self._spotify_status_lbl = QLabel("Not logged in")
+        self._spotify_status_lbl.setWordWrap(True)
+
+        self._spotify_login_btn = QPushButton("Log in")
+        self._spotify_login_btn.setObjectName("QueueBtn")
+        self._spotify_login_btn.setFixedHeight(40)
+        self._spotify_login_btn.setMinimumWidth(110)
+        self._spotify_login_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self._spotify_login_btn.clicked.connect(self._on_spotify_login_clicked)
+        login_row = QHBoxLayout()
+        login_row.setSpacing(10)
+        login_row.addWidget(self._spotify_status_lbl, 1)
+        login_row.addWidget(self._spotify_login_btn)
+
+        # Credentials path as a read-only line edit (like the Download-folder field):
+        # a word-wrapped QLabel clips a long, near-spaceless path inside the form row.
+        # Single-line + elided + full path in the tooltip renders cleanly at any width.
+        self._spotify_path_field = QLineEdit("")
+        self._spotify_path_field.setObjectName("PlaylistLink")  # reuse the input look
+        self._spotify_path_field.setReadOnly(True)
+        self._spotify_path_field.setCursorPosition(0)
+        self._spotify_path_field.setFixedHeight(40)
+
+        # Extended-mix fallback: when Spotify has no extended cut, search YouTube for it.
+        self._ext_yt_fallback_cb = QCheckBox("Use YouTube if no extended mix is on Spotify")
+        self._ext_yt_fallback_cb.setChecked(bool(cfg.get("librespot_extended_yt_fallback", False)))
+        self._ext_yt_fallback_cb.setToolTip(
+            "Extended-mix mode only: when Spotify has no extended / club mix for a track, "
+            "search YouTube for it (which often hosts the 12″/extended cut) instead of "
+            "downloading the original Spotify track. The result is a YouTube MP3, not native "
+            "OGG, and is flagged in History."
+        )
+        self._ext_yt_fallback_cb.toggled.connect(
+            lambda on: self._save("librespot_extended_yt_fallback", on)
+        )
+
+        # Optional Spotify Developer app for the extended-mix search. librespot's own
+        # (keymaster) token gets /v1/search hard-throttled/banned; the user's own app
+        # has its own rate-limit bucket, so the extended lookup actually works.
+        self._spotify_client_id_field = QLineEdit(cfg.get("spotify_client_id") or "")
+        self._spotify_client_id_field.setObjectName("PlaylistLink")
+        self._spotify_client_id_field.setFixedHeight(40)
+        self._spotify_client_id_field.setPlaceholderText("Spotify app Client ID")
+        self._spotify_client_id_field.textChanged.connect(
+            lambda t: self._save("spotify_client_id", t.strip())
+        )
+
+        self._spotify_client_secret_field = QLineEdit(cfg.get("spotify_client_secret") or "")
+        self._spotify_client_secret_field.setObjectName("PlaylistLink")
+        self._spotify_client_secret_field.setFixedHeight(40)
+        self._spotify_client_secret_field.setEchoMode(QLineEdit.Password)
+        self._spotify_client_secret_field.setPlaceholderText("Spotify app Client Secret")
+        self._spotify_client_secret_field.textChanged.connect(
+            lambda t: self._save("spotify_client_secret", t.strip())
+        )
+
+        api_help = QLabel(
+            "Optional — only for finding extended mixes. Create a free app at "
+            "developer.spotify.com/dashboard and paste its Client ID / Secret. Without "
+            "this, Spotify rate-limits the extended search and it falls back to the "
+            "original track."
+        )
+        api_help.setWordWrap(True)
+        api_help.setObjectName("subtleLabel")
+
+        disclaimer = QLabel(self._LIBRESPOT_DISCLAIMER)
+        disclaimer.setWordWrap(True)
+        disclaimer.setObjectName("subtleLabel")
+
+        card, form = self._card()
+        form.addRow("Account", login_row)
+        form.addRow("Credentials", self._spotify_path_field)
+        form.addRow(self._ext_yt_fallback_cb)
+        form.addRow("API Client ID", self._spotify_client_id_field)
+        form.addRow("API Client Secret", self._spotify_client_secret_field)
+        form.addRow(api_help)
+        form.addRow(disclaimer)
+        return card
+
+    def _current_source(self):
+        return self._source_options[self._source_cb.currentIndex()][1]
+
+    def _resolved_creds_path(self):
+        """Configured credentials path, or the librespot backend's default."""
+        if self._spotify_creds_path:
+            return self._spotify_creds_path
+        from backends.librespot.session import default_credentials_path
+
+        return default_credentials_path()
+
+    def _on_source_change(self, index):
+        """Persist the download source, gating librespot behind a one-time consent
+        dialog and toggling the Spotify card's enabled state."""
+        source = self._source_options[index][1]
+        if source == "librespot" and not bool(self._controller._config.get("librespot_consented")):
+            if not self._confirm_librespot_consent():
+                # Declined: revert to the previous selection without saving.
+                self._source_cb.blockSignals(True)
+                self._source_cb.setCurrentIndex(self._source_index)
+                self._source_cb.blockSignals(False)
+                self._sync_spotify_card_enabled()
+                return
+            self._save("librespot_consented", True)
+        self._source_index = index
+        self._save("download_source", source)
+        self._sync_spotify_card_enabled()
+
+    def _confirm_librespot_consent(self):
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Use Spotify (librespot) source?")
+        box.setText("Stream Spotify's native 320k OGG via a third-party client?")
+        box.setInformativeText(self._LIBRESPOT_DISCLAIMER)
+        box.setStandardButtons(QMessageBox.Cancel | QMessageBox.Ok)
+        box.setDefaultButton(QMessageBox.Cancel)
+        return box.exec_() == QMessageBox.Ok
+
+    def _sync_spotify_card_enabled(self):
+        self._spotify_card.setEnabled(self._current_source() == "librespot")
+
+    def _refresh_spotify_status(self):
+        """Reflect login state from the presence of a cached credentials file."""
+        path = self._resolved_creds_path()
+        try:
+            from backends.librespot import _librespot as _adapter
+
+            logged_in = _adapter.has_stored_credentials(path)
+        except Exception:  # noqa: BLE001 - status display is best-effort
+            logged_in = os.path.isfile(path)
+        if logged_in:
+            self._spotify_status_lbl.setText("Logged in (cached credentials)")
+            self._spotify_login_btn.setText("Log out")
+        else:
+            self._spotify_status_lbl.setText("Not logged in")
+            self._spotify_login_btn.setText("Log in")
+        self._spotify_path_field.setText(path)
+        self._spotify_path_field.setToolTip(path)
+        self._spotify_path_field.setCursorPosition(0)
+
+    def _on_spotify_login_clicked(self):
+        path = self._resolved_creds_path()
+        try:
+            from backends.librespot import _librespot as _adapter
+
+            logged_in = _adapter.has_stored_credentials(path)
+        except Exception:  # noqa: BLE001
+            logged_in = os.path.isfile(path)
+        if logged_in:
+            self._logout_spotify(path)
+            return
+        # Start the blocking OAuth flow on a worker thread.
+        from backends.librespot import _librespot as _adapter
+
+        if not _adapter.is_available():
+            QMessageBox.warning(
+                self,
+                "Spotify login unavailable",
+                "The librespot library isn't available in this build, so Spotify login "
+                f"can't run.\n\n{_adapter.import_error()}",
+            )
+            return
+        self._spotify_login_btn.setEnabled(False)
+        self._spotify_status_lbl.setText("Opening browser to log in…")
+        self._login_thread = LibrespotLoginThread(path)
+        self._login_thread.auth_url.connect(self._open_auth_url)
+        self._login_thread.finished_ok.connect(self._on_login_ok)
+        self._login_thread.failed.connect(self._on_login_failed)
+        self._login_thread.finished.connect(lambda: setattr(self, "_login_thread", None))
+        self._login_thread.start()
+
+    def _logout_spotify(self, path):
+        if (
+            QMessageBox.question(
+                self,
+                "Log out of Spotify?",
+                "Remove the cached Spotify credentials from this computer?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            != QMessageBox.Yes
+        ):
+            return
+        with contextlib.suppress(OSError):
+            if os.path.isfile(path):
+                os.remove(path)
+        self._refresh_spotify_status()
+
+    @pyqtSlot(str)
+    def _open_auth_url(self, url):
+        """Open the Spotify authorize URL in the browser (on the GUI thread)."""
+        from PyQt5.QtCore import QUrl
+        from PyQt5.QtGui import QDesktopServices
+
+        if not QDesktopServices.openUrl(QUrl(url)):
+            webbrowser.open(url)
+
+    @pyqtSlot(str, str)
+    def _on_login_ok(self, username, product):
+        # Persist the resolved credentials path so downloads + this panel agree on it.
+        path = self._resolved_creds_path()
+        self._spotify_creds_path = path
+        self._save("spotify_credentials_path", path)
+        self._spotify_login_btn.setEnabled(True)
+        self._refresh_spotify_status()
+        prod = (product or "").lower()
+        if prod and prod != "premium":
+            self._spotify_status_lbl.setText(
+                f"Logged in as {username} — account is '{prod}', NOT Premium. "
+                "Native 320k OGG needs Premium; downloads will fall back to YouTube."
+            )
+        else:
+            tier = "Premium" if prod == "premium" else "unknown plan"
+            self._spotify_status_lbl.setText(f"Logged in as {username} ({tier})")
+
+    @pyqtSlot(str)
+    def _on_login_failed(self, message):
+        self._spotify_login_btn.setEnabled(True)
+        self._refresh_spotify_status()
+        QMessageBox.warning(self, "Spotify login failed", message or "Login failed")
 
     def _choose_folder(self):
         start = (
@@ -1801,6 +2288,12 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             max_track_mb=self._config.get("max_track_mb", 0),
             artist_first=self._config.get("artist_first", False),
             download_source=self._config.get("download_source", DEFAULT_DOWNLOAD_SOURCE),
+            spotify_credentials_path=self._config.get("spotify_credentials_path", ""),
+            librespot_extended_yt_fallback=bool(
+                self._config.get("librespot_extended_yt_fallback", False)
+            ),
+            spotify_client_id=self._config.get("spotify_client_id", ""),
+            spotify_client_secret=self._config.get("spotify_client_secret", ""),
         )
         self.scraper_thread = thread
         self._active_threads.append(thread)  # strong ref until fully finished
@@ -2106,7 +2599,10 @@ class MainWindow(QMainWindow, Ui_MainWindow):
     @pyqtSlot(dict)
     def add_song_META(self, song_meta):
         # Each emit means a file finished writing -> mark the current track done.
-        self._mark_track_done()
+        # The backend sets via_youtube_fallback when it served this track from YouTube
+        # instead of native Spotify (not Premium / no native OGG / no extended cut);
+        # flag that in the History entry.
+        self._mark_track_done(via_youtube=bool(song_meta.get("via_youtube_fallback")))
         if self.AddMetaDataCheck.isChecked():
             meta_thread = WritingMetaTagsThread(song_meta, song_meta["file"])
             meta_thread.tags_success.connect(lambda x: self.statusMsg.setText(f"{x}"))
@@ -2166,11 +2662,15 @@ class MainWindow(QMainWindow, Ui_MainWindow):
         self._current_track_item = item
         self._current_track_label = label
 
-    def _mark_track_done(self):
+    def _mark_track_done(self, via_youtube=False):
         if self._current_track_item is not None:
             with contextlib.suppress(RuntimeError):  # row may have been cleared mid-flight
                 self._current_track_item.setText(f"✓   {self._current_track_label}")
-            QListWidgetItem(f"✓   {self._current_track_label}", self.historyList)
+            # Note a YouTube fallback in the history entry (the specific reason — not
+            # Premium / no native OGG / no extended cut — is in the status bar + console
+            # logs); native Spotify downloads have no suffix.
+            suffix = "   ·  via YouTube fallback" if via_youtube else ""
+            QListWidgetItem(f"✓   {self._current_track_label}{suffix}", self.historyList)
             self._current_track_item = None
 
     def clear_history(self):
