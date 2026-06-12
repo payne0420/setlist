@@ -40,6 +40,17 @@ All claims below were read from that commit's source, not the goal's illustrativ
   alpha lib/its deps are missing. Exposes thin helpers: `build_session(creds_path, on_auth_url)`,
   `track_id(base62)`, `vorbis_quality(name)`, `load_stream(session, tid, quality)`,
   `product_type(session)`, `web_token(session)`. This contains an upstream break to ONE file.
+  **Upstream bugfix:** pinned `AbsChunkedInputStream.check_availability` preloads the wrong
+  chunks — the loop tests `requested_chunks()[i]` (already requested) instead of
+  `not requested_chunks()[i]`, and marks `requested_chunks()[chunk]` instead of `[i]`. We
+  monkeypatch `_fixed_check_availability` (verbatim transcription of upstream lines 116–149
+  with only those two lines fixed) onto the class from `is_available()` / `load_loaded_stream()`,
+  guarded by `inspect.getsource` broken-source markers (skip on incompatible upstream; on frozen
+  builds where source is unavailable, still apply the patch and record `source_unavailable`).
+  Also sets `preload_ahead = PRELOAD_AHEAD_CHUNKS` (8).
+  Resume pacing, `stream_read_halted` (not `_resumed`), `math.log10` retry sleep, and recursive
+  `self.check_availability(chunk, True, True)` are preserved verbatim. Benchmark on a pinned
+  track: stock ~2.17 MB/s vs fixed ~25.4 MB/s; output bytes are byte-identical to stock.
 - `session.py` — `LibrespotSession`: resolve creds path (QStandardPaths AppConfigLocation,
   chmod 0600), OAuth-or-stored login (delegates to adapter), `is_premium()`, `close()`.
 - `audio.py` — `capture_ogg(stream, dest_tmp, cancel, *, chunk_size=64*1024)`: pure byte pump,

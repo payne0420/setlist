@@ -22,12 +22,114 @@ from the goal's illustrative snippets in two load-bearing ways:
 
 from __future__ import annotations
 
+import inspect
+import math
 import os
+import threading
+import time
 from typing import Callable
 
 # Cached import probe: None = not yet checked, True/False = result.
 _AVAILABLE: bool | None = None
 _IMPORT_ERROR: BaseException | None = None
+
+# 8 chunks × 128 KiB = 1 MiB in flight. Measured on a real 10.9 MB / 84-chunk track:
+# stock (serial) 5.04s = 2.17 MB/s, depth-8 = 0.43s = 25.4 MB/s, byte-identical;
+# diminishing returns beyond 8.
+PRELOAD_AHEAD_CHUNKS = 8
+
+PATCH_STATUS_APPLIED = "applied"
+PATCH_STATUS_SKIPPED_INCOMPATIBLE = "skipped_incompatible"
+PATCH_STATUS_SOURCE_UNAVAILABLE = "source_unavailable"
+
+# Exact substrings from pinned ``audio/__init__.py`` ``check_availability`` (buggy preload loop).
+_BROKEN_CHECK_AVAILABILITY_MARKERS = (
+    "if (self.requested_chunks()[i]\n"
+    "                    and self.retries[i] < self.preload_chunk_retries):",
+    "self.request_chunk_from_stream(i)\n                self.requested_chunks()[chunk] = True",
+)
+
+_CHECK_AVAILABILITY_PATCHED = False
+_CHECK_AVAILABILITY_PATCH_STATUS: str | None = None
+_CHECK_AVAILABILITY_PATCH_LOCK = threading.Lock()
+
+
+def check_availability_patch_status() -> str | None:
+    """Patch outcome: ``applied`` | ``skipped_incompatible`` | ``source_unavailable`` | None."""
+    return _CHECK_AVAILABILITY_PATCH_STATUS
+
+
+def _fixed_check_availability(self, chunk: int, wait: bool, halted: bool) -> None:
+    """Upstream ``AbsChunkedInputStream.check_availability`` with two preload-loop fixes.
+
+    Transcribed from the pinned librespot commit (``audio/__init__.py`` lines 116-149)
+    except: (1) ``not self.requested_chunks()[i]`` in the preload guard, and
+    (2) ``self.requested_chunks()[i] = True`` instead of ``[chunk]``.
+    """
+    if halted and not wait:
+        raise TypeError()
+    if not self.requested_chunks()[chunk]:
+        self.request_chunk_from_stream(chunk)
+        self.requested_chunks()[chunk] = True
+    for i in range(
+        chunk + 1,
+        min(self.chunks() - 1, chunk + self.preload_ahead) + 1,
+    ):
+        if not self.requested_chunks()[i] and self.retries[i] < self.preload_chunk_retries:
+            self.request_chunk_from_stream(i)
+            self.requested_chunks()[i] = True
+    if wait:
+        if self.available_chunks()[chunk]:
+            return
+        retry = False
+        with self.wait_lock:
+            if not halted:
+                self.stream_read_halted(chunk, int(time.time() * 1000))
+            self.chunk_exception = None
+            self.wait_for_chunk = chunk
+            self.wait_lock.wait_for(lambda: self.available_chunks()[chunk])
+            if self.closed:
+                return
+            if self.chunk_exception is not None:
+                if self.should_retry(chunk):
+                    retry = True
+                else:
+                    from librespot.audio import AbsChunkedInputStream
+
+                    raise AbsChunkedInputStream.ChunkException
+            if not retry:
+                self.stream_read_halted(chunk, int(time.time() * 1000))
+        if retry:
+            time.sleep(math.log10(self.retries[chunk]))
+            self.check_availability(chunk, True, True)
+
+
+def _apply_check_availability_patch() -> None:
+    """Monkeypatch upstream preload bug; idempotent, locked, and source-guarded."""
+    global _CHECK_AVAILABILITY_PATCHED, _CHECK_AVAILABILITY_PATCH_STATUS
+    if _CHECK_AVAILABILITY_PATCHED:
+        return
+    with _CHECK_AVAILABILITY_PATCH_LOCK:
+        if _CHECK_AVAILABILITY_PATCHED:
+            return
+        from librespot.audio import AbsChunkedInputStream
+
+        try:
+            source = inspect.getsource(AbsChunkedInputStream.check_availability)
+        except (OSError, TypeError):
+            AbsChunkedInputStream.check_availability = _fixed_check_availability
+            AbsChunkedInputStream.preload_ahead = PRELOAD_AHEAD_CHUNKS
+            _CHECK_AVAILABILITY_PATCH_STATUS = PATCH_STATUS_SOURCE_UNAVAILABLE
+            _CHECK_AVAILABILITY_PATCHED = True
+            return
+        if not all(marker in source for marker in _BROKEN_CHECK_AVAILABILITY_MARKERS):
+            _CHECK_AVAILABILITY_PATCH_STATUS = PATCH_STATUS_SKIPPED_INCOMPATIBLE
+            _CHECK_AVAILABILITY_PATCHED = True
+            return
+        AbsChunkedInputStream.check_availability = _fixed_check_availability
+        AbsChunkedInputStream.preload_ahead = PRELOAD_AHEAD_CHUNKS
+        _CHECK_AVAILABILITY_PATCH_STATUS = PATCH_STATUS_APPLIED
+        _CHECK_AVAILABILITY_PATCHED = True
 
 
 def is_available() -> bool:
@@ -43,6 +145,7 @@ def is_available() -> bool:
             import librespot.core  # noqa: F401
             import librespot.metadata  # noqa: F401
 
+            _apply_check_availability_patch()
             _AVAILABLE = True
         except BaseException as exc:  # noqa: BLE001 - any import-time failure disables it
             _AVAILABLE = False
@@ -168,6 +271,7 @@ def load_loaded_stream(session, track_id, quality):
 
     ``preload=False``, ``halt_listener=None`` per the pinned API.
     """
+    _apply_check_availability_patch()
     return session.content_feeder().load(track_id, quality, False, None)
 
 

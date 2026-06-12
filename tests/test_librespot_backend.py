@@ -16,8 +16,14 @@ without any Spotify network access. Covers the goal's acceptance criteria:
 from __future__ import annotations
 
 import base64
+import inspect
 import json
+import math
 import os
+import sys
+import threading
+import time
+import types
 from types import SimpleNamespace
 
 import pytest
@@ -1037,6 +1043,312 @@ class TestPremiumDetection:
         assert sess._product is None
         assert sess.is_known_free() is False  # inconclusive != free
         assert sess.is_premium() is False
+
+
+class _FakeChunkedStream:
+    """Minimal ``AbsChunkedInputStream`` stand-in for preload-loop tests."""
+
+    preload_ahead = adapter.PRELOAD_AHEAD_CHUNKS
+    preload_chunk_retries = 2
+    closed = False
+    chunk_exception = None
+    wait_for_chunk = -1
+    wait_lock = threading.Condition()
+
+    def __init__(self, *, n_chunks: int = 10):
+        self._requested = [False] * n_chunks
+        self._available = [False] * n_chunks
+        self.retries = [0] * n_chunks
+        self.requested: list[int] = []
+
+    def requested_chunks(self):
+        return self._requested
+
+    def available_chunks(self):
+        return self._available
+
+    def chunks(self):
+        return len(self._requested)
+
+    def request_chunk_from_stream(self, index: int) -> None:
+        self.requested.append(index)
+
+    def stream_read_halted(self, chunk: int, _time: int) -> None:
+        pass
+
+    def should_retry(self, chunk: int) -> bool:
+        return False
+
+    def check_availability(self, chunk: int, wait: bool, halted: bool) -> None:
+        adapter._fixed_check_availability(self, chunk, wait, halted)
+
+
+# Pinned upstream ``check_availability`` body (buggy preload loop) for guard tests.
+_BROKEN_CHECK_AVAILABILITY_SOURCE = (
+    "    def check_availability(self, chunk: int, wait: bool, halted: bool) -> None:\n"
+    "        if halted and not wait:\n"
+    "            raise TypeError()\n"
+    "        if not self.requested_chunks()[chunk]:\n"
+    "            self.request_chunk_from_stream(chunk)\n"
+    "            self.requested_chunks()[chunk] = True\n"
+    "        for i in range(chunk + 1,\n"
+    "                       min(self.chunks() - 1, chunk + self.preload_ahead) + 1):\n"
+    "            if (self.requested_chunks()[i]\n"
+    "                    and self.retries[i] < self.preload_chunk_retries):\n"
+    "                self.request_chunk_from_stream(i)\n"
+    "                self.requested_chunks()[chunk] = True\n"
+)
+
+
+def _reset_patch_state(monkeypatch) -> None:
+    monkeypatch.setattr(adapter, "_CHECK_AVAILABILITY_PATCHED", False, raising=False)
+    monkeypatch.setattr(adapter, "_CHECK_AVAILABILITY_PATCH_STATUS", None, raising=False)
+
+
+def _install_dummy_audio_module(monkeypatch, cls) -> None:
+    mod = types.ModuleType("librespot.audio")
+    mod.AbsChunkedInputStream = cls
+    monkeypatch.setitem(sys.modules, "librespot.audio", mod)
+
+
+class TestCheckAvailabilityPatch:
+    """Guards the upstream preload-loop bugfix shim in ``_librespot``."""
+
+    def test_fixed_preloads_ahead_chunks(self):
+        stream = _FakeChunkedStream(n_chunks=10)
+        adapter._fixed_check_availability(stream, 0, False, False)
+        assert stream.requested == list(range(9))  # chunks 0..8 (depth 8 ahead of 0)
+        assert stream._requested[0:9] == [True] * 9
+
+    def test_fixed_preload_clamps_at_eof(self):
+        stream = _FakeChunkedStream(n_chunks=3)
+        adapter._fixed_check_availability(stream, 1, False, False)
+        assert stream.requested == [1, 2]
+
+    def test_fixed_marks_preloaded_index_not_parent(self):
+        stream = _FakeChunkedStream(n_chunks=10)
+        adapter._fixed_check_availability(stream, 2, False, False)
+        assert stream._requested[3] is True
+        assert stream._requested[2] is True
+
+    def test_buggy_upstream_logic_would_skip_preload(self):
+        stream = _FakeChunkedStream(n_chunks=10)
+
+        def buggy(self, chunk, wait, halted):
+            if not self.requested_chunks()[chunk]:
+                self.request_chunk_from_stream(chunk)
+                self.requested_chunks()[chunk] = True
+            for i in range(
+                chunk + 1,
+                min(self.chunks() - 1, chunk + self.preload_ahead) + 1,
+            ):
+                if self.requested_chunks()[i] and self.retries[i] < self.preload_chunk_retries:
+                    self.request_chunk_from_stream(i)
+                    self.requested_chunks()[chunk] = True
+
+        buggy(stream, 0, False, False)
+        assert stream.requested == [0]
+
+    def test_halted_without_wait_raises_type_error(self):
+        stream = _FakeChunkedStream()
+        with pytest.raises(TypeError):
+            adapter._fixed_check_availability(stream, 0, False, True)
+
+    def test_wait_path_unblocks_when_chunk_becomes_available(self):
+        stream = _FakeChunkedStream(n_chunks=5)
+
+        def wake():
+            time.sleep(0.05)
+            with stream.wait_lock:
+                stream._available[2] = True
+                stream.wait_lock.notify_all()
+
+        threading.Thread(target=wake, daemon=True).start()
+        worker = threading.Thread(
+            target=adapter._fixed_check_availability,
+            args=(stream, 2, True, False),
+            daemon=True,
+        )
+        worker.start()
+        worker.join(timeout=2)
+        assert not worker.is_alive()
+        assert stream._available[2]
+
+    def test_wait_path_calls_stream_read_halted_not_when_halted(self):
+        stream = _FakeChunkedStream(n_chunks=5)
+        halted_calls: list[tuple[int, int]] = []
+        stream.stream_read_halted = lambda chunk, ts: halted_calls.append((chunk, ts))
+
+        def wake():
+            time.sleep(0.05)
+            with stream.wait_lock:
+                stream._available[1] = True
+                stream.wait_lock.notify_all()
+
+        threading.Thread(target=wake, daemon=True).start()
+        worker = threading.Thread(
+            target=adapter._fixed_check_availability,
+            args=(stream, 1, True, False),
+            daemon=True,
+        )
+        worker.start()
+        worker.join(timeout=2)
+        assert not worker.is_alive()
+        assert halted_calls and halted_calls[0][0] == 1
+
+        halted_calls.clear()
+        stream._available[1] = False
+        worker2 = threading.Thread(
+            target=adapter._fixed_check_availability,
+            args=(stream, 1, True, True),
+            daemon=True,
+        )
+
+        def wake2():
+            time.sleep(0.05)
+            with stream.wait_lock:
+                stream._available[1] = True
+                stream.wait_lock.notify_all()
+
+        threading.Thread(target=wake2, daemon=True).start()
+        worker2.start()
+        worker2.join(timeout=2)
+        assert not worker2.is_alive()
+        # Upstream quirk: only the pre-wait call is gated by ``not halted``; the
+        # post-wait success path still invokes ``stream_read_halted``.
+        assert len(halted_calls) == 1
+        assert halted_calls[0][0] == 1
+
+    def test_wait_path_retries_with_log10_sleep_and_recursion(self, monkeypatch):
+        stream = _FakeChunkedStream(n_chunks=5)
+        stream.retries[2] = 100
+        stream.should_retry = lambda _chunk: True
+        sleeps: list[float] = []
+        recursed: list[bool] = []
+        entered_wait = threading.Event()
+        stream.stream_read_halted = lambda *_a, **_k: entered_wait.set()
+        stream.check_availability = lambda *_a, **_k: recursed.append(True)
+        monkeypatch.setattr(time, "sleep", lambda s: sleeps.append(s))
+
+        def wake_with_error():
+            assert entered_wait.wait(timeout=2)
+            with stream.wait_lock:
+                stream.chunk_exception = RuntimeError("chunk fail")
+                stream._available[2] = True
+                stream.wait_lock.notify_all()
+
+        threading.Thread(target=wake_with_error, daemon=True).start()
+        worker = threading.Thread(
+            target=adapter._fixed_check_availability,
+            args=(stream, 2, True, False),
+            daemon=True,
+        )
+        worker.start()
+        worker.join(timeout=2)
+        assert not worker.is_alive()
+        assert sleeps == [math.log10(100)]
+        assert recursed == [True]
+
+    def test_wait_path_raises_chunk_exception_when_not_retrying(self, monkeypatch):
+        class DummyAbsChunkedInputStream:
+            class ChunkException(Exception):
+                pass
+
+        _install_dummy_audio_module(monkeypatch, DummyAbsChunkedInputStream)
+        stream = _FakeChunkedStream(n_chunks=5)
+        stream.should_retry = lambda _chunk: False
+
+        def wake_with_error():
+            time.sleep(0.05)
+            with stream.wait_lock:
+                stream.chunk_exception = RuntimeError("chunk fail")
+                stream._available[3] = True
+                stream.wait_lock.notify_all()
+
+        threading.Thread(target=wake_with_error, daemon=True).start()
+        caught: list[BaseException] = []
+
+        def run():
+            try:
+                adapter._fixed_check_availability(stream, 3, True, False)
+            except BaseException as exc:
+                caught.append(exc)
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        worker.join(timeout=2)
+        assert not worker.is_alive()
+        assert len(caught) == 1
+        assert isinstance(caught[0], DummyAbsChunkedInputStream.ChunkException)
+
+    def test_patch_applies_when_broken_markers_present(self, monkeypatch):
+        _reset_patch_state(monkeypatch)
+
+        class DummyAbsChunkedInputStream:
+            preload_ahead = 0
+
+            @staticmethod
+            def check_availability(self, chunk, wait, halted):  # noqa: ARG004
+                pass
+
+        _install_dummy_audio_module(monkeypatch, DummyAbsChunkedInputStream)
+        monkeypatch.setattr(
+            inspect,
+            "getsource",
+            lambda _fn: _BROKEN_CHECK_AVAILABILITY_SOURCE,
+        )
+        adapter._apply_check_availability_patch()
+        assert DummyAbsChunkedInputStream.check_availability is adapter._fixed_check_availability
+        assert DummyAbsChunkedInputStream.preload_ahead == adapter.PRELOAD_AHEAD_CHUNKS
+        assert adapter.check_availability_patch_status() == adapter.PATCH_STATUS_APPLIED
+
+    def test_patch_skips_when_markers_absent(self, monkeypatch):
+        _reset_patch_state(monkeypatch)
+
+        def original(self, _c, _w, _h):
+            pass
+
+        class DummyAbsChunkedInputStream:
+            check_availability = original
+            preload_ahead = 99
+
+        _install_dummy_audio_module(monkeypatch, DummyAbsChunkedInputStream)
+        monkeypatch.setattr(
+            inspect,
+            "getsource",
+            lambda _fn: "def check_availability(self, chunk, wait, halted): pass",
+        )
+        adapter._apply_check_availability_patch()
+        assert DummyAbsChunkedInputStream.check_availability is original
+        assert DummyAbsChunkedInputStream.preload_ahead == 99
+        assert (
+            adapter.check_availability_patch_status() == adapter.PATCH_STATUS_SKIPPED_INCOMPATIBLE
+        )
+
+    @pytest.mark.parametrize(
+        "getsource_exc",
+        [OSError("source code not available"), TypeError("source code not available")],
+    )
+    def test_patch_source_unavailable_on_frozen_build(self, monkeypatch, getsource_exc):
+        _reset_patch_state(monkeypatch)
+
+        class DummyAbsChunkedInputStream:
+            preload_ahead = 0
+
+            @staticmethod
+            def check_availability(self, chunk, wait, halted):  # noqa: ARG004
+                pass
+
+        _install_dummy_audio_module(monkeypatch, DummyAbsChunkedInputStream)
+
+        def raise_getsource(_fn):
+            raise getsource_exc
+
+        monkeypatch.setattr(inspect, "getsource", raise_getsource)
+        adapter._apply_check_availability_patch()
+        assert DummyAbsChunkedInputStream.check_availability is adapter._fixed_check_availability
+        assert DummyAbsChunkedInputStream.preload_ahead == adapter.PRELOAD_AHEAD_CHUNKS
+        assert adapter.check_availability_patch_status() == adapter.PATCH_STATUS_SOURCE_UNAVAILABLE
 
 
 class TestStrictVorbisPicker:
