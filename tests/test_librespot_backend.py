@@ -1083,6 +1083,24 @@ class _FakeChunkedStream:
         adapter._fixed_check_availability(self, chunk, wait, halted)
 
 
+class _SyncFailingFakeChunkedStream(_FakeChunkedStream):
+    """``request_chunk_from_stream`` fails synchronously (pre-arm race reproducer)."""
+
+    def request_chunk_from_stream(self, index: int) -> None:
+        self.requested.append(index)
+        self.notify_chunk_error(index, RuntimeError("instant chunk fail"))
+
+    def notify_chunk_error(self, index: int, exc: BaseException) -> None:
+        self._available[index] = False
+        self._requested[index] = False
+        self.retries[index] += 1
+        with self.wait_lock:
+            if index == self.wait_for_chunk:
+                self.chunk_exception = exc
+                self.wait_for_chunk = -1
+                self.wait_lock.notify_all()
+
+
 # Pinned upstream ``check_availability`` body (buggy preload loop) for guard tests.
 _BROKEN_CHECK_AVAILABILITY_SOURCE = (
     "    def check_availability(self, chunk: int, wait: bool, halted: bool) -> None:\n"
@@ -1097,6 +1115,17 @@ _BROKEN_CHECK_AVAILABILITY_SOURCE = (
     "                    and self.retries[i] < self.preload_chunk_retries):\n"
     "                self.request_chunk_from_stream(i)\n"
     "                self.requested_chunks()[chunk] = True\n"
+)
+_BROKEN_NOTIFY_CHUNK_ERROR_SOURCE = (
+    "    def notify_chunk_error(self, index: int, exception: Exception) -> None:\n"
+    "        self.available_chunks()[index] = False\n"
+    "        self.requested_chunks()[index] = False\n"
+    "        self.retries[index] += 1\n"
+    "        with self.wait_lock:\n"
+    "            if index == self.wait_for_chunk:\n"
+    "                self.chunk_exception = exception\n"
+    "                self.wait_for_chunk = -1\n"
+    "                self.wait_lock.notify_all()\n"
 )
 
 
@@ -1291,11 +1320,19 @@ class TestCheckAvailabilityPatch:
             def check_availability(self, chunk, wait, halted):  # noqa: ARG004
                 pass
 
+            @staticmethod
+            def notify_chunk_error(self, index, exception):  # noqa: ARG004
+                pass
+
         _install_dummy_audio_module(monkeypatch, DummyAbsChunkedInputStream)
         monkeypatch.setattr(
             inspect,
             "getsource",
-            lambda _fn: _BROKEN_CHECK_AVAILABILITY_SOURCE,
+            lambda fn: (
+                _BROKEN_CHECK_AVAILABILITY_SOURCE
+                if fn.__name__ == "check_availability"
+                else _BROKEN_NOTIFY_CHUNK_ERROR_SOURCE
+            ),
         )
         adapter._apply_check_availability_patch()
         assert DummyAbsChunkedInputStream.check_availability is adapter._fixed_check_availability
@@ -1312,11 +1349,50 @@ class TestCheckAvailabilityPatch:
             check_availability = original
             preload_ahead = 99
 
+            @staticmethod
+            def notify_chunk_error(self, index, exception):  # noqa: ARG004
+                pass
+
         _install_dummy_audio_module(monkeypatch, DummyAbsChunkedInputStream)
         monkeypatch.setattr(
             inspect,
             "getsource",
-            lambda _fn: "def check_availability(self, chunk, wait, halted): pass",
+            lambda fn: (
+                "def check_availability(self, chunk, wait, halted): pass"
+                if fn.__name__ == "check_availability"
+                else _BROKEN_NOTIFY_CHUNK_ERROR_SOURCE
+            ),
+        )
+        adapter._apply_check_availability_patch()
+        assert DummyAbsChunkedInputStream.check_availability is original
+        assert DummyAbsChunkedInputStream.preload_ahead == 99
+        assert (
+            adapter.check_availability_patch_status() == adapter.PATCH_STATUS_SKIPPED_INCOMPATIBLE
+        )
+
+    def test_patch_skips_when_notify_chunk_error_marker_absent(self, monkeypatch):
+        _reset_patch_state(monkeypatch)
+
+        def original(self, _c, _w, _h):
+            pass
+
+        class DummyAbsChunkedInputStream:
+            check_availability = original
+            preload_ahead = 99
+
+            @staticmethod
+            def notify_chunk_error(self, index, exception):  # noqa: ARG004
+                pass
+
+        _install_dummy_audio_module(monkeypatch, DummyAbsChunkedInputStream)
+        monkeypatch.setattr(
+            inspect,
+            "getsource",
+            lambda fn: (
+                _BROKEN_CHECK_AVAILABILITY_SOURCE
+                if fn.__name__ == "check_availability"
+                else "def notify_chunk_error(self, index, exception): pass"
+            ),
         )
         adapter._apply_check_availability_patch()
         assert DummyAbsChunkedInputStream.check_availability is original
@@ -1339,6 +1415,10 @@ class TestCheckAvailabilityPatch:
             def check_availability(self, chunk, wait, halted):  # noqa: ARG004
                 pass
 
+            @staticmethod
+            def notify_chunk_error(self, index, exception):  # noqa: ARG004
+                pass
+
         _install_dummy_audio_module(monkeypatch, DummyAbsChunkedInputStream)
 
         def raise_getsource(_fn):
@@ -1349,6 +1429,318 @@ class TestCheckAvailabilityPatch:
         assert DummyAbsChunkedInputStream.check_availability is adapter._fixed_check_availability
         assert DummyAbsChunkedInputStream.preload_ahead == adapter.PRELOAD_AHEAD_CHUNKS
         assert adapter.check_availability_patch_status() == adapter.PATCH_STATUS_SOURCE_UNAVAILABLE
+
+    def test_instant_failure_of_waited_chunk_raises_not_hangs(self, monkeypatch):
+        class DummyAbsChunkedInputStream:
+            class ChunkException(Exception):
+                pass
+
+        _install_dummy_audio_module(monkeypatch, DummyAbsChunkedInputStream)
+        stream = _SyncFailingFakeChunkedStream(n_chunks=10)
+        stream.should_retry = lambda _chunk: False
+        caught: list[BaseException] = []
+
+        def run():
+            try:
+                adapter._fixed_check_availability(stream, 0, True, False)
+            except BaseException as exc:
+                caught.append(exc)
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        worker.join(timeout=3)
+        assert not worker.is_alive()
+        assert len(caught) == 1
+        assert isinstance(caught[0], DummyAbsChunkedInputStream.ChunkException)
+
+    def test_instant_failure_of_preload_chunk_not_stuck_requested(self):
+        stream = _SyncFailingFakeChunkedStream(n_chunks=10)
+        adapter._fixed_check_availability(stream, 0, False, False)
+        for i in range(9):  # chunks 0..8 preloaded
+            assert stream._requested[i] is False
+            assert stream.retries[i] == 1
+
+    def test_wait_wakes_on_chunk_error_and_raises(self, monkeypatch):
+        class DummyAbsChunkedInputStream:
+            class ChunkException(Exception):
+                pass
+
+        _install_dummy_audio_module(monkeypatch, DummyAbsChunkedInputStream)
+        stream = _FakeChunkedStream(n_chunks=5)
+        stream.should_retry = lambda _chunk: False
+        caught: list[BaseException] = []
+
+        def run():
+            try:
+                adapter._fixed_check_availability(stream, 2, True, False)
+            except BaseException as exc:
+                caught.append(exc)
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        time.sleep(0.05)
+        with stream.wait_lock:
+            stream.chunk_exception = RuntimeError("chunk fail")
+            stream.wait_lock.notify_all()
+        worker.join(timeout=2)
+        assert not worker.is_alive()
+        assert len(caught) == 1
+        assert isinstance(caught[0], DummyAbsChunkedInputStream.ChunkException)
+
+    def test_wait_wakes_on_close(self):
+        stream = _FakeChunkedStream(n_chunks=5)
+
+        def run():
+            adapter._fixed_check_availability(stream, 2, True, False)
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        time.sleep(0.05)
+        with stream.wait_lock:
+            stream.closed = True
+            stream.wait_lock.notify_all()
+        worker.join(timeout=2)
+        assert not worker.is_alive()
+
+
+# Pinned upstream ``CdnManager.Streamer`` bodies for CDN guard tests.
+_BROKEN_CDN_REQUEST_CHUNK_SOURCE = (
+    "        def request_chunk(self, index: int) -> None:\n"
+    "            response = self.request(index)\n"
+    "            self.write_chunk(response.buffer, index, False)\n"
+)
+_BROKEN_CDN_REQUEST_SOURCE = (
+    "        def request(self, chunk: int = None, range_start: int = None, range_end: int = None)\n"
+    "                -> CdnManager.InternalResponse:\n"
+    "            if chunk is None and range_start is None and range_end is None:\n"
+    "                raise TypeError()\n"
+    "            if chunk is not None:\n"
+    "                range_start = ChannelManager.chunk_size * chunk\n"
+    "                range_end = (chunk + 1) * ChannelManager.chunk_size - 1\n"
+    "            response = self.__session.client().get(\n"
+    "                self.__cdn_url.url,\n"
+    "                headers=CaseInsensitiveDict({\n"
+    '                    "Range": "bytes={}-{}".format(range_start, range_end)\n'
+    "                }),\n"
+    "            )\n"
+    "            if response.status_code != 206:\n"
+    "                raise IOError(response.status_code)\n"
+    "            body = response.content\n"
+    "            if body is None:\n"
+    '                raise IOError("Response body is empty!")\n'
+    "            return CdnManager.InternalResponse(body, response.headers)\n"
+)
+
+
+def _reset_cdn_patch_state(monkeypatch) -> None:
+    monkeypatch.setattr(adapter, "_CDN_ROBUSTNESS_PATCHED", False, raising=False)
+    monkeypatch.setattr(adapter, "_CDN_ROBUSTNESS_PATCH_STATUS", None, raising=False)
+
+
+def _install_dummy_cdn_streamer_module(monkeypatch, streamer_cls) -> None:
+    mod = types.ModuleType("librespot.audio")
+    cdn = types.SimpleNamespace(Streamer=streamer_cls)
+    mod.CdnManager = cdn
+    monkeypatch.setitem(sys.modules, "librespot.audio", mod)
+
+
+class TestCdnRobustnessPatch:
+    """Guards the CDN timeout + executor-error notify shim in ``_librespot``."""
+
+    def test_request_chunk_failure_notifies_internal_stream(self):
+        calls: list[tuple[int, BaseException]] = []
+        internal = SimpleNamespace(notify_chunk_error=lambda index, exc: calls.append((index, exc)))
+        err = RuntimeError("cdn down")
+
+        class DummyStreamer:
+            def request(self, index: int):
+                raise err
+
+            def write_chunk(self, *_a, **_k):
+                pytest.fail("write_chunk must not run on failure")
+
+        streamer = DummyStreamer()
+        streamer._Streamer__internal_stream = internal
+        adapter._fixed_cdn_request_chunk(streamer, 3)
+        assert calls == [(3, err)]
+
+    def test_request_chunk_success_writes_chunk(self):
+        calls: list[tuple[int, BaseException]] = []
+        written: list[tuple[bytes, int, bool]] = []
+        internal = SimpleNamespace(notify_chunk_error=lambda index, exc: calls.append((index, exc)))
+        payload = b"chunk-bytes"
+
+        class DummyStreamer:
+            def request(self, index: int):
+                return SimpleNamespace(buffer=payload)
+
+            def write_chunk(self, buffer, index, cached):
+                written.append((buffer, index, cached))
+
+        streamer = DummyStreamer()
+        streamer._Streamer__internal_stream = internal
+        adapter._fixed_cdn_request_chunk(streamer, 5)
+        assert written == [(payload, 5, False)]
+        assert calls == []
+
+    def test_request_adds_timeout_and_preserves_behavior(self, monkeypatch):
+        from librespot.audio.storage import ChannelManager
+
+        recorded: dict = {}
+
+        class FakeResponse:
+            def __init__(self, status_code=206, content=b"body", headers=None):
+                self.status_code = status_code
+                self.content = content
+                self.headers = headers or {}
+
+        class DummyStreamer:
+            _Streamer__cdn_url = SimpleNamespace(url="https://cdn.example/track")
+
+            def _Streamer__session(self):
+                pass
+
+        streamer = DummyStreamer()
+        streamer._Streamer__session = SimpleNamespace(
+            client=lambda: SimpleNamespace(
+                get=lambda url, headers=None, timeout=None: (
+                    recorded.update({"url": url, "headers": headers, "timeout": timeout})
+                    or FakeResponse(headers={"Content-Range": "bytes 0-131071/999999"})
+                )
+            )
+        )
+
+        chunk = 2
+        result = adapter._fixed_cdn_request(streamer, chunk=chunk)
+        assert recorded["timeout"] == adapter.CDN_REQUEST_TIMEOUT_S
+        assert recorded["url"] == "https://cdn.example/track"
+        expected_start = ChannelManager.chunk_size * chunk
+        expected_end = (chunk + 1) * ChannelManager.chunk_size - 1
+        assert recorded["headers"]["Range"] == f"bytes={expected_start}-{expected_end}"
+        assert result.buffer == b"body"
+
+        streamer._Streamer__session.client = lambda: SimpleNamespace(
+            get=lambda *_a, **_k: FakeResponse(status_code=404)
+        )
+        with pytest.raises(IOError):
+            adapter._fixed_cdn_request(streamer, chunk=chunk)
+
+        streamer._Streamer__session.client = lambda: SimpleNamespace(
+            get=lambda *_a, **_k: FakeResponse(status_code=206, content=None)
+        )
+        with pytest.raises(IOError, match="Response body is empty"):
+            adapter._fixed_cdn_request(streamer, chunk=chunk)
+
+    def test_patch_applies_when_broken_markers_present(self, monkeypatch):
+        _reset_cdn_patch_state(monkeypatch)
+
+        class DummyStreamer:
+            @staticmethod
+            def request_chunk(self, index):  # noqa: ARG004
+                pass
+
+            @staticmethod
+            def request(self, chunk=None, range_start=None, range_end=None):  # noqa: ARG004
+                pass
+
+        _install_dummy_cdn_streamer_module(monkeypatch, DummyStreamer)
+
+        def fake_getsource(fn):
+            if fn.__name__ == "request_chunk":
+                return _BROKEN_CDN_REQUEST_CHUNK_SOURCE
+            if fn.__name__ == "request":
+                return _BROKEN_CDN_REQUEST_SOURCE
+            raise AssertionError(f"unexpected getsource target: {fn}")
+
+        monkeypatch.setattr(inspect, "getsource", fake_getsource)
+        adapter._apply_cdn_robustness_patch()
+        assert DummyStreamer.request_chunk is adapter._fixed_cdn_request_chunk
+        assert DummyStreamer.request is adapter._fixed_cdn_request
+        assert adapter.cdn_robustness_patch_status() == adapter.PATCH_STATUS_APPLIED
+
+    def test_patch_skips_when_markers_absent(self, monkeypatch):
+        _reset_cdn_patch_state(monkeypatch)
+
+        def original_chunk(self, index):  # noqa: ARG004
+            pass
+
+        def original_request(self, chunk=None, range_start=None, range_end=None):  # noqa: ARG004
+            pass
+
+        class DummyStreamer:
+            request_chunk = original_chunk
+            request = original_request
+
+        _install_dummy_cdn_streamer_module(monkeypatch, DummyStreamer)
+        monkeypatch.setattr(
+            inspect,
+            "getsource",
+            lambda fn: (
+                "def request_chunk(self, index):\n    try:\n        response = self.request(index)\n"
+                if fn.__name__ == "request_chunk"
+                else 'def request(self):\n    timeout=1\n    "Range": "bytes={}-{}"\n'
+            ),
+        )
+        adapter._apply_cdn_robustness_patch()
+        assert DummyStreamer.request_chunk is original_chunk
+        assert DummyStreamer.request is original_request
+        assert adapter.cdn_robustness_patch_status() == adapter.PATCH_STATUS_SKIPPED_INCOMPATIBLE
+
+    @pytest.mark.parametrize(
+        "getsource_exc",
+        [OSError("source code not available"), TypeError("source code not available")],
+    )
+    def test_patch_source_unavailable_on_frozen_build(self, monkeypatch, getsource_exc):
+        _reset_cdn_patch_state(monkeypatch)
+
+        class DummyStreamer:
+            @staticmethod
+            def request_chunk(self, index):  # noqa: ARG004
+                pass
+
+            @staticmethod
+            def request(self, chunk=None, range_start=None, range_end=None):  # noqa: ARG004
+                pass
+
+        _install_dummy_cdn_streamer_module(monkeypatch, DummyStreamer)
+
+        def raise_getsource(_fn):
+            raise getsource_exc
+
+        monkeypatch.setattr(inspect, "getsource", raise_getsource)
+        adapter._apply_cdn_robustness_patch()
+        assert DummyStreamer.request_chunk is adapter._fixed_cdn_request_chunk
+        assert DummyStreamer.request is adapter._fixed_cdn_request
+        assert adapter.cdn_robustness_patch_status() == adapter.PATCH_STATUS_SOURCE_UNAVAILABLE
+
+    def test_patch_idempotent(self, monkeypatch):
+        _reset_cdn_patch_state(monkeypatch)
+
+        class DummyStreamer:
+            @staticmethod
+            def request_chunk(self, index):  # noqa: ARG004
+                pass
+
+            @staticmethod
+            def request(self, chunk=None, range_start=None, range_end=None):  # noqa: ARG004
+                pass
+
+        _install_dummy_cdn_streamer_module(monkeypatch, DummyStreamer)
+        monkeypatch.setattr(
+            inspect,
+            "getsource",
+            lambda fn: (
+                _BROKEN_CDN_REQUEST_CHUNK_SOURCE
+                if fn.__name__ == "request_chunk"
+                else _BROKEN_CDN_REQUEST_SOURCE
+            ),
+        )
+        adapter._apply_cdn_robustness_patch()
+        chunk_fn = DummyStreamer.request_chunk
+        request_fn = DummyStreamer.request
+        adapter._apply_cdn_robustness_patch()
+        assert DummyStreamer.request_chunk is chunk_fn
+        assert DummyStreamer.request is request_fn
 
 
 class TestStrictVorbisPicker:

@@ -38,6 +38,10 @@ _IMPORT_ERROR: BaseException | None = None
 # diminishing returns beyond 8.
 PRELOAD_AHEAD_CHUNKS = 8
 
+# CDN chunk GET timeouts (connect, read). Read must exceed a slow 128 KiB fetch yet bound
+# a blackholed socket so executor threads cannot block forever after a network blip.
+CDN_REQUEST_TIMEOUT_S = (10, 60)
+
 PATCH_STATUS_APPLIED = "applied"
 PATCH_STATUS_SKIPPED_INCOMPATIBLE = "skipped_incompatible"
 PATCH_STATUS_SOURCE_UNAVAILABLE = "source_unavailable"
@@ -48,10 +52,23 @@ _BROKEN_CHECK_AVAILABILITY_MARKERS = (
     "                    and self.retries[i] < self.preload_chunk_retries):",
     "self.request_chunk_from_stream(i)\n                self.requested_chunks()[chunk] = True",
 )
+# Re-dispatch fix depends on ``notify_chunk_error`` only recording ``chunk_exception`` when
+# ``index == wait_for_chunk``.
+_NOTIFY_CHUNK_ERROR_MARKER = "if index == self.wait_for_chunk"
 
 _CHECK_AVAILABILITY_PATCHED = False
 _CHECK_AVAILABILITY_PATCH_STATUS: str | None = None
 _CHECK_AVAILABILITY_PATCH_LOCK = threading.Lock()
+
+_CDN_ROBUSTNESS_PATCHED = False
+_CDN_ROBUSTNESS_PATCH_STATUS: str | None = None
+_CDN_ROBUSTNESS_PATCH_LOCK = threading.Lock()
+
+# Guard markers for pinned ``CdnManager.Streamer.request_chunk`` / ``request``.
+_BROKEN_CDN_REQUEST_CHUNK_MARKERS = ("response = self.request(index)",)
+_BROKEN_CDN_REQUEST_CHUNK_ANTI_MARKERS = ("except",)
+_BROKEN_CDN_REQUEST_MARKERS = ('"Range": "bytes={}-{}"',)
+_BROKEN_CDN_REQUEST_ANTI_MARKERS = ("timeout",)
 
 
 def check_availability_patch_status() -> str | None:
@@ -59,25 +76,36 @@ def check_availability_patch_status() -> str | None:
     return _CHECK_AVAILABILITY_PATCH_STATUS
 
 
+def cdn_robustness_patch_status() -> str | None:
+    """Patch outcome: ``applied`` | ``skipped_incompatible`` | ``source_unavailable`` | None."""
+    return _CDN_ROBUSTNESS_PATCH_STATUS
+
+
 def _fixed_check_availability(self, chunk: int, wait: bool, halted: bool) -> None:
-    """Upstream ``AbsChunkedInputStream.check_availability`` with two preload-loop fixes.
+    """Upstream ``AbsChunkedInputStream.check_availability`` with five fixes.
 
     Transcribed from the pinned librespot commit (``audio/__init__.py`` lines 116-149)
     except: (1) ``not self.requested_chunks()[i]`` in the preload guard, and
-    (2) ``self.requested_chunks()[i] = True`` instead of ``[chunk]``.
+    (2) ``self.requested_chunks()[i] = True`` instead of ``[chunk]``, and
+    (3) the wait predicate also wakes on ``chunk_exception`` or ``closed``, and
+    (4) mark-before-submit: set ``requested_chunks()[…] = True`` before
+    ``request_chunk_from_stream`` so an instant failure (which resets ``requested`` in
+    ``notify_chunk_error``) is never overwritten back to True, and
+    (5) armed re-dispatch: after arming ``wait_for_chunk``, re-submit the chunk if a
+    pre-arm failure already consumed the request so the outcome cannot be lost.
     """
     if halted and not wait:
         raise TypeError()
     if not self.requested_chunks()[chunk]:
-        self.request_chunk_from_stream(chunk)
         self.requested_chunks()[chunk] = True
+        self.request_chunk_from_stream(chunk)
     for i in range(
         chunk + 1,
         min(self.chunks() - 1, chunk + self.preload_ahead) + 1,
     ):
         if not self.requested_chunks()[i] and self.retries[i] < self.preload_chunk_retries:
-            self.request_chunk_from_stream(i)
             self.requested_chunks()[i] = True
+            self.request_chunk_from_stream(i)
     if wait:
         if self.available_chunks()[chunk]:
             return
@@ -87,7 +115,18 @@ def _fixed_check_availability(self, chunk: int, wait: bool, halted: bool) -> Non
                 self.stream_read_halted(chunk, int(time.time() * 1000))
             self.chunk_exception = None
             self.wait_for_chunk = chunk
-            self.wait_lock.wait_for(lambda: self.available_chunks()[chunk])
+            if not self.requested_chunks()[chunk] and not self.available_chunks()[chunk]:
+                # a pre-arm failure consumed the request; re-dispatch now that the waiter is
+                # armed so the outcome cannot be lost (failure -> chunk_exception -> wake)
+                self.requested_chunks()[chunk] = True
+                self.request_chunk_from_stream(chunk)
+            self.wait_lock.wait_for(
+                lambda: (
+                    self.available_chunks()[chunk]
+                    or self.chunk_exception is not None
+                    or self.closed
+                )
+            )
             if self.closed:
                 return
             if self.chunk_exception is not None:
@@ -116,6 +155,7 @@ def _apply_check_availability_patch() -> None:
 
         try:
             source = inspect.getsource(AbsChunkedInputStream.check_availability)
+            notify_source = inspect.getsource(AbsChunkedInputStream.notify_chunk_error)
         except (OSError, TypeError):
             AbsChunkedInputStream.check_availability = _fixed_check_availability
             AbsChunkedInputStream.preload_ahead = PRELOAD_AHEAD_CHUNKS
@@ -126,10 +166,88 @@ def _apply_check_availability_patch() -> None:
             _CHECK_AVAILABILITY_PATCH_STATUS = PATCH_STATUS_SKIPPED_INCOMPATIBLE
             _CHECK_AVAILABILITY_PATCHED = True
             return
+        if _NOTIFY_CHUNK_ERROR_MARKER not in notify_source:
+            _CHECK_AVAILABILITY_PATCH_STATUS = PATCH_STATUS_SKIPPED_INCOMPATIBLE
+            _CHECK_AVAILABILITY_PATCHED = True
+            return
         AbsChunkedInputStream.check_availability = _fixed_check_availability
         AbsChunkedInputStream.preload_ahead = PRELOAD_AHEAD_CHUNKS
         _CHECK_AVAILABILITY_PATCH_STATUS = PATCH_STATUS_APPLIED
         _CHECK_AVAILABILITY_PATCHED = True
+
+
+def _fixed_cdn_request_chunk(self, index: int) -> None:
+    """Upstream ``CdnManager.Streamer.request_chunk`` with executor-safe error notify."""
+    try:
+        response = self.request(index)
+        self.write_chunk(response.buffer, index, False)
+    except Exception as exc:  # noqa: BLE001 - route all CDN failures through notify_chunk_error
+        self._Streamer__internal_stream.notify_chunk_error(index, exc)
+
+
+def _fixed_cdn_request(self, chunk: int = None, range_start: int = None, range_end: int = None):
+    """Upstream ``CdnManager.Streamer.request`` with a bounded ``client().get`` timeout."""
+    from librespot.audio import CdnManager
+    from librespot.audio.storage import ChannelManager
+    from requests.structures import CaseInsensitiveDict
+
+    if chunk is None and range_start is None and range_end is None:
+        raise TypeError()
+    if chunk is not None:
+        range_start = ChannelManager.chunk_size * chunk
+        range_end = (chunk + 1) * ChannelManager.chunk_size - 1
+    response = self._Streamer__session.client().get(
+        self._Streamer__cdn_url.url,
+        headers=CaseInsensitiveDict(
+            {
+                "Range": "bytes={}-{}".format(range_start, range_end)  # noqa: UP032
+            }
+        ),
+        timeout=CDN_REQUEST_TIMEOUT_S,
+    )
+    if response.status_code != 206:
+        raise IOError(response.status_code)  # noqa: UP024
+    body = response.content
+    if body is None:
+        raise IOError("Response body is empty!")  # noqa: UP024
+    return CdnManager.InternalResponse(body, response.headers)
+
+
+def _apply_cdn_robustness_patch() -> None:
+    """Monkeypatch CDN chunk fetch robustness; idempotent, locked, and source-guarded."""
+    global _CDN_ROBUSTNESS_PATCHED, _CDN_ROBUSTNESS_PATCH_STATUS
+    if _CDN_ROBUSTNESS_PATCHED:
+        return
+    with _CDN_ROBUSTNESS_PATCH_LOCK:
+        if _CDN_ROBUSTNESS_PATCHED:
+            return
+        from librespot.audio import CdnManager
+
+        try:
+            request_chunk_source = inspect.getsource(CdnManager.Streamer.request_chunk)
+            request_source = inspect.getsource(CdnManager.Streamer.request)
+        except (OSError, TypeError):
+            CdnManager.Streamer.request_chunk = _fixed_cdn_request_chunk
+            CdnManager.Streamer.request = _fixed_cdn_request
+            _CDN_ROBUSTNESS_PATCH_STATUS = PATCH_STATUS_SOURCE_UNAVAILABLE
+            _CDN_ROBUSTNESS_PATCHED = True
+            return
+        chunk_ok = all(m in request_chunk_source for m in _BROKEN_CDN_REQUEST_CHUNK_MARKERS)
+        chunk_ok = chunk_ok and not any(
+            m in request_chunk_source for m in _BROKEN_CDN_REQUEST_CHUNK_ANTI_MARKERS
+        )
+        request_ok = all(m in request_source for m in _BROKEN_CDN_REQUEST_MARKERS)
+        request_ok = request_ok and not any(
+            m in request_source for m in _BROKEN_CDN_REQUEST_ANTI_MARKERS
+        )
+        if not (chunk_ok and request_ok):
+            _CDN_ROBUSTNESS_PATCH_STATUS = PATCH_STATUS_SKIPPED_INCOMPATIBLE
+            _CDN_ROBUSTNESS_PATCHED = True
+            return
+        CdnManager.Streamer.request_chunk = _fixed_cdn_request_chunk
+        CdnManager.Streamer.request = _fixed_cdn_request
+        _CDN_ROBUSTNESS_PATCH_STATUS = PATCH_STATUS_APPLIED
+        _CDN_ROBUSTNESS_PATCHED = True
 
 
 def is_available() -> bool:
@@ -146,6 +264,7 @@ def is_available() -> bool:
             import librespot.metadata  # noqa: F401
 
             _apply_check_availability_patch()
+            _apply_cdn_robustness_patch()
             _AVAILABLE = True
         except BaseException as exc:  # noqa: BLE001 - any import-time failure disables it
             _AVAILABLE = False
@@ -272,6 +391,7 @@ def load_loaded_stream(session, track_id, quality):
     ``preload=False``, ``halt_listener=None`` per the pinned API.
     """
     _apply_check_availability_patch()
+    _apply_cdn_robustness_patch()
     return session.content_feeder().load(track_id, quality, False, None)
 
 

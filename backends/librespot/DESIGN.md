@@ -44,13 +44,58 @@ All claims below were read from that commit's source, not the goal's illustrativ
   chunks — the loop tests `requested_chunks()[i]` (already requested) instead of
   `not requested_chunks()[i]`, and marks `requested_chunks()[chunk]` instead of `[i]`. We
   monkeypatch `_fixed_check_availability` (verbatim transcription of upstream lines 116–149
-  with only those two lines fixed) onto the class from `is_available()` / `load_loaded_stream()`,
-  guarded by `inspect.getsource` broken-source markers (skip on incompatible upstream; on frozen
-  builds where source is unavailable, still apply the patch and record `source_unavailable`).
+  with the enumerated deltas below) onto the class from `is_available()` / `load_loaded_stream()`,
+  guarded by `inspect.getsource` broken-source markers on `check_availability` and
+  `notify_chunk_error` (skip on incompatible upstream; on frozen builds where source is
+  unavailable, still apply the patch and record `source_unavailable`).
   Also sets `preload_ahead = PRELOAD_AHEAD_CHUNKS` (8).
   Resume pacing, `stream_read_halted` (not `_resumed`), `math.log10` retry sleep, and recursive
   `self.check_availability(chunk, True, True)` are preserved verbatim. Benchmark on a pinned
   track: stock ~2.17 MB/s vs fixed ~25.4 MB/s; output bytes are byte-identical to stock.
+  **Third fix (wait predicate):** upstream `wait_lock.wait_for` only tests
+  `available_chunks()[chunk]`, so a `notify_all()` from `notify_chunk_error` or `close()` wakes
+  the waiter but the predicate stays false and the thread sleeps forever — the single worker
+  hangs at a `.part` file. Our predicate also wakes on `chunk_exception is not None` or
+  `closed`, so errors and shutdown propagate out of `reader.read()`.
+  **Fourth fix (mark-before-submit):** upstream sets `requested_chunks()[…] = True` *after*
+  `request_chunk_from_stream`. An instant (synchronous) chunk failure resets `requested[i]` to
+  False inside `notify_chunk_error` but the post-dispatch assignment overwrites it back to True,
+  leaving a chunk marked in-flight that nobody is fetching.
+  **Fifth fix (armed re-dispatch):** upstream dispatches the waited chunk *before* arming
+  `wait_for_chunk`. `notify_chunk_error` only records `chunk_exception` when
+  `index == wait_for_chunk`, so a pre-arm failure is lost and the waiter hangs forever even
+  with the fixed predicate. After arming the waiter we re-dispatch if the request was consumed
+  without success, so the failure is recorded and the waiter wakes.
+  **CDN robustness patch:** pinned `CdnManager.Streamer.request_chunk` has no try/except, so
+  executor-submitted chunk fetches swallow exceptions and never call `notify_chunk_error`.
+  `request()` calls `client().get(...)` with no timeout, so a blackholed socket blocks the
+  executor thread forever. We monkeypatch both onto `CdnManager.Streamer` from the same call
+  sites, guarded by `inspect.getsource` markers (all-or-nothing; skip on incompatible upstream;
+  on frozen builds where source is unavailable, still apply and record `source_unavailable`).
+  `request_chunk` wraps the body in try/except and calls
+  `notify_chunk_error(index, exc)` on failure. `request` is a verbatim transcription with
+  `timeout=CDN_REQUEST_TIMEOUT_S` `(10, 60)` on the GET.
+  **Recovery semantics:** a failing or timing-out chunk now flows: exception in executor →
+  `notify_chunk_error` (increments `retries[i]` first, sets `requested[i]=False`, and only when
+  `index == wait_for_chunk` sets `chunk_exception` and wakes the waiter) → the fixed wait
+  predicate wakes → `should_retry` is consulted. Pinned librespot increments `retries[index]`
+  inside `notify_chunk_error` *before* `should_retry` runs, so the `retries[chunk] < 1` branch
+  is already false on the first error reaching an armed waiter; CDN `InternalStream` is
+  constructed with `retry_on_chunk_error=False`, so `should_retry` returns false immediately —
+  the first armed error raises `ChunkException` straight to `audio.py`'s outer retry ladder.
+  With the armed re-dispatch fix, a pre-arm failure gets exactly one in-flight re-attempt while
+  the waiter is armed before that same path applies → `ChunkException` propagates out of
+  `reader.read()` →
+  `capture_ogg` raises → `audio.py`'s existing transient-retry ladder (`ChunkException` matches
+  `"chunk"` in `_is_transient` by class name and message) does cleanup + 10/20/30s backoff +
+  a fresh `load_loaded_stream` (new storage resolve, new CDN URL, new audio key on the
+  self-reconnected session) → after 3 attempts drops to the next quality tier → after both tiers,
+  `OggCaptureError` → the per-track fallback chain takes over and the run continues. No permanent
+  hangs; Stop stays responsive because `read()` always terminates in bounded time.
+  **Note on AP session logs:** the scary `Failed reading packet! [Errno 54] Connection reset by
+  peer` line is the access-point Mercury session self-healing upstream (`Receiver` catches it,
+  `session.reconnect()` picks a new AP, re-auths, and spawns a fresh `Receiver`). The permanent
+  hang was the CDN byte stream, not the AP session — now fixed by the CDN + wait-predicate shims.
 - `session.py` — `LibrespotSession`: resolve creds path (QStandardPaths AppConfigLocation,
   chmod 0600), OAuth-or-stored login (delegates to adapter), `is_premium()`, `close()`.
 - `audio.py` — `capture_ogg(stream, dest_tmp, cancel, *, chunk_size=64*1024)`: pure byte pump,
