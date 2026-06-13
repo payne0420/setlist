@@ -151,7 +151,7 @@ def index():
     return jsonify(
         {
             "name": "Setlist API",
-            "version": "2.2.0",
+            "version": "2.3.0",
             "mode": "metadata-only",
             "description": "Fetches Spotify metadata. For MP3 downloads, use the desktop app.",
             "endpoints": {

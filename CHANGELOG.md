@@ -12,8 +12,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-06-13
+
+Resilience release: YouTube downloads now survive session rate-limits, native
+Spotify-stream capture is ~10× faster, a network blip can no longer freeze the
+pipeline, and metadata/audio-key throttling are hardened on large playlists.
+
+### Added
+
+- **YouTube rate-limit survival** — when YouTube rate-limits the session
+  ("This content isn't available, try again later"), downloads no longer fail en
+  masse. All workers pause together, poll every ~5 minutes, and automatically
+  resume and retry the held tracks once the limit lifts; a 75-minute cap falls
+  back to a clean skip that the resume manifest finishes on a later run.
+- **YouTube throttle settings** — two new controls on the YouTube settings card:
+  **Max parallel downloads** (1–4) and **Slow mode** (adds yt-dlp's randomized
+  request delays to reduce the chance of a rate-limit). Defaults are unchanged
+  (4 workers, slow mode off).
+
+### Changed
+
+- **~10× faster native OGG (librespot)** — a guarded preload shim replaces the
+  pinned library's serial 128 KiB chunking, raising native Spotify-stream
+  throughput from ~2 MB/s to ~20–25 MB/s with byte-for-byte identical output.
+- **Reliable metadata on large playlists** — Mercury-first lookups with a shared
+  429 cooldown keep album/track-number tagging working on 100+ track playlists
+  without tripping Spotify's anonymous-API rate limit.
+
 ### Fixed
 
+- **Pipeline freeze on a network blip (librespot)** — closes three pinned-library
+  CDN defects plus a pre-arm race (GET timeouts, executor-error notification,
+  armed re-dispatch) so a transient network hiccup no longer hangs the whole
+  download pipeline.
 - **Librespot audio-key throttling** — runtime patch removes upstream's zero-delay internal
   retry and shared callback state; adaptive AIMD inter-track pacing escalates when Spotify
   rate-limits audio keys and decays after clean fetches.
@@ -282,7 +313,8 @@ Sunnify 2.0.7.
 - Node 20+ for webclient
 - FFmpeg + yt-dlp for audio processing
 
-[Unreleased]: https://github.com/payne0420/setlist/compare/v2.2.0...HEAD
+[Unreleased]: https://github.com/payne0420/setlist/compare/v2.3.0...HEAD
+[2.3.0]: https://github.com/payne0420/setlist/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/payne0420/setlist/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/payne0420/setlist/releases/tag/v2.1.0
 [2.0.7]: https://github.com/sunnypatell/sunnify-spotify-downloader/compare/v2.0.6...v2.0.7
