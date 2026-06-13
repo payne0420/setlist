@@ -478,7 +478,9 @@ class TestBackendFetch:
         be = self._backend(monkeypatch, product="premium")
         captured = {}
 
-        def fake_fetch_ogg(session_raw, base62, *, dest, cancel, on_status=None, on_metadata=None):
+        def fake_fetch_ogg(
+            session_raw, base62, *, dest, cancel, on_status=None, on_metadata=None, on_throttle=None
+        ):
             with open(dest, "wb") as f:
                 f.write(b"OggS-data")
             captured["dest"] = dest
@@ -539,7 +541,9 @@ class TestBackendFetch:
         be = self._backend(monkeypatch, product=None)
         captured = {}
 
-        def fake_fetch_ogg(session_raw, base62, *, dest, cancel, on_status=None, on_metadata=None):
+        def fake_fetch_ogg(
+            session_raw, base62, *, dest, cancel, on_status=None, on_metadata=None, on_throttle=None
+        ):
             with open(dest, "wb") as f:
                 f.write(b"OggS")
             captured["called"] = True
@@ -561,7 +565,9 @@ class TestBackendFetch:
         monkeypatch.setattr(search, "find_extended_id", lambda *_a, **_k: "EXTENDED_ID")
         captured = {}
 
-        def fake_fetch_ogg(session_raw, base62, *, dest, cancel, on_status=None, on_metadata=None):
+        def fake_fetch_ogg(
+            session_raw, base62, *, dest, cancel, on_status=None, on_metadata=None, on_throttle=None
+        ):
             captured["base62"] = base62
             with open(dest, "wb") as f:
                 f.write(b"OggS")
@@ -584,7 +590,9 @@ class TestBackendFetch:
         monkeypatch.setattr(search, "find_extended_id", lambda *_a, **_k: None)
         captured = {}
 
-        def fake_fetch_ogg(session_raw, base62, *, dest, cancel, on_status=None, on_metadata=None):
+        def fake_fetch_ogg(
+            session_raw, base62, *, dest, cancel, on_status=None, on_metadata=None, on_throttle=None
+        ):
             captured["base62"] = base62
             with open(dest, "wb") as f:
                 f.write(b"OggS")
@@ -626,7 +634,9 @@ class TestBackendFetch:
         monkeypatch.setattr(search, "find_extended_id", lambda *_a, **_k: None)
         captured = {}
 
-        def fake_fetch_ogg(session_raw, base62, *, dest, cancel, on_status=None, on_metadata=None):
+        def fake_fetch_ogg(
+            session_raw, base62, *, dest, cancel, on_status=None, on_metadata=None, on_throttle=None
+        ):
             captured["base62"] = base62
             with open(dest, "wb") as f:
                 f.write(b"OggS")
@@ -655,7 +665,9 @@ class TestBackendFetch:
         monkeypatch.setattr(search, "find_extended_id", boom)
         captured = {}
 
-        def fake_fetch_ogg(session_raw, base62, *, dest, cancel, on_status=None, on_metadata=None):
+        def fake_fetch_ogg(
+            session_raw, base62, *, dest, cancel, on_status=None, on_metadata=None, on_throttle=None
+        ):
             captured["base62"] = base62
             with open(dest, "wb") as f:
                 f.write(b"OggS")
@@ -2033,7 +2045,9 @@ class TestBackendSurfacesMetadata:
     def test_native_fetch_stashes_metadata(self, tmp_path, monkeypatch):
         be = self._backend(monkeypatch)
 
-        def fake_fetch_ogg(session_raw, base62, *, dest, cancel, on_status=None, on_metadata=None):
+        def fake_fetch_ogg(
+            session_raw, base62, *, dest, cancel, on_status=None, on_metadata=None, on_throttle=None
+        ):
             with open(dest, "wb") as f:
                 f.write(b"OggS")
             on_metadata({"album": "Whenever You Need Somebody", "artists": "Rick Astley"})
@@ -2056,7 +2070,9 @@ class TestBackendSurfacesMetadata:
     def test_metadata_reset_each_fetch(self, tmp_path, monkeypatch):
         be = self._backend(monkeypatch, product="premium")
 
-        def fake_fetch_ogg(session_raw, base62, *, dest, cancel, on_status=None, on_metadata=None):
+        def fake_fetch_ogg(
+            session_raw, base62, *, dest, cancel, on_status=None, on_metadata=None, on_throttle=None
+        ):
             with open(dest, "wb") as f:
                 f.write(b"OggS")
             on_metadata({"album": "A"})
@@ -2522,3 +2538,621 @@ class TestWriteMetadataOggDisc:
         )
         sd._write_metadata_ogg(str(dest), {"title": "T", "artists": "A", "album": ""}, None)
         assert OggVorbis(str(dest))["album"] == ["Real Album"]
+
+
+# Pinned upstream ``AudioKeyManager`` bodies for audio-key guard tests.
+_BROKEN_GET_AUDIO_KEY_SOURCE = (
+    "    def get_audio_key(self,\n"
+    "                      gid: bytes,\n"
+    "                      file_id: bytes,\n"
+    "                      retry: bool = True) -> bytes:\n"
+    "        seq: int\n"
+    "        with self.__seq_holder_lock:\n"
+    "            seq = self.__seq_holder\n"
+    "            self.__seq_holder += 1\n"
+    "        out = io.BytesIO()\n"
+    "        out.write(file_id)\n"
+    "        out.write(gid)\n"
+    '        out.write(struct.pack(">i", seq))\n'
+    "        out.write(self.__zero_short)\n"
+    "        out.seek(0)\n"
+    "        self.__session.send(Packet.Type.request_key, out.read())\n"
+    "        callback = AudioKeyManager.SyncCallback(self)\n"
+    "        self.__callbacks[seq] = callback\n"
+    "        key = callback.wait_response()\n"
+    "        if key is None:\n"
+    "            if retry:\n"
+    "                return self.get_audio_key(gid, file_id, False)\n"
+    "            raise RuntimeError(\n"
+    '                "Failed fetching audio key! gid: {}, fileId: {}".format(\n'
+    "                    util.bytes_to_hex(gid), util.bytes_to_hex(file_id)))\n"
+    "        return key\n"
+)
+_BROKEN_SYNC_CALLBACK_SOURCE = (
+    "    class SyncCallback(Callback):\n"
+    "        __audio_key_manager: AudioKeyManager\n"
+    "        __reference = queue.Queue()\n"
+    "        __reference_lock = threading.Condition()\n"
+    "\n"
+    "        def __init__(self, audio_key_manager: AudioKeyManager):\n"
+    "            self.__audio_key_manager = audio_key_manager\n"
+    "\n"
+    "        def key(self, key: bytes) -> None:\n"
+    "            with self.__reference_lock:\n"
+    "                self.__reference.put(key)\n"
+    "                self.__reference_lock.notify_all()\n"
+    "\n"
+    "        def error(self, code: int) -> None:\n"
+    "            self.__audio_key_manager.logger.fatal(\n"
+    '                "Audio key error, code: {}".format(code))\n'
+    "            with self.__reference_lock:\n"
+    "                self.__reference.put(None)\n"
+    "                self.__reference_lock.notify_all()\n"
+    "\n"
+    "        def wait_response(self) -> bytes:\n"
+    "            with self.__reference_lock:\n"
+    "                self.__reference_lock.wait(\n"
+    "                    AudioKeyManager.audio_key_request_timeout)\n"
+    "                return self.__reference.get(block=False)\n"
+)
+
+
+def _reset_audio_key_patch_state(monkeypatch) -> None:
+    monkeypatch.setattr(adapter, "_AUDIO_KEY_PATCHED", False, raising=False)
+    monkeypatch.setattr(adapter, "_AUDIO_KEY_PATCH_STATUS", None, raising=False)
+
+
+def _install_dummy_audio_key_module(monkeypatch, manager_cls) -> None:
+    mod = types.ModuleType("librespot.audio")
+    mod.AudioKeyManager = manager_cls
+    monkeypatch.setitem(sys.modules, "librespot.audio", mod)
+
+
+def _make_audio_key_manager_self(*, timeout=0.05, on_send=None):
+    """Dummy ``AudioKeyManager`` ``self`` for :func:`adapter._fixed_get_audio_key`."""
+    callbacks: dict = {}
+    seq_lock = threading.Lock()
+
+    class Session:
+        def send(self, cmd, payload):
+            if on_send is not None:
+                on_send(cmd, payload, callbacks)
+
+    mgr = SimpleNamespace(
+        _AudioKeyManager__seq_holder_lock=seq_lock,
+        _AudioKeyManager__seq_holder=0,
+        _AudioKeyManager__zero_short=b"\x00\x00",
+        _AudioKeyManager__callbacks=callbacks,
+        _AudioKeyManager__session=Session(),
+        audio_key_request_timeout=timeout,
+    )
+    mgr._callbacks = callbacks
+    return mgr
+
+
+class TestAudioKeyPatch:
+    """Guards the audio-key retry/callback shim in ``_librespot``."""
+
+    def test_error_code_2_single_send_callbacks_empty(self):
+        sends: list = []
+
+        def on_send(cmd, payload, callbacks):
+            sends.append((cmd, payload))
+            assert len(callbacks) == 1
+            next(iter(callbacks.values())).error(2)
+
+        mgr = _make_audio_key_manager_self(on_send=on_send)
+        gid, file_id = b"g" * 16, b"f" * 20
+        with pytest.raises(adapter.AudioKeyError, match="audio key") as exc_info:
+            adapter._fixed_get_audio_key(mgr, gid, file_id)
+        assert exc_info.value.code == 2
+        assert len(sends) == 1
+        assert mgr._callbacks == {}
+
+    def test_success_returns_key_and_payload_layout(self):
+        key = b"\xaa" * 16
+        recorded: dict = {}
+
+        def on_send(cmd, payload, callbacks):
+            recorded["cmd"] = cmd
+            recorded["payload"] = payload
+            next(iter(callbacks.values())).key(key)
+
+        mgr = _make_audio_key_manager_self(on_send=on_send)
+        gid, file_id = b"g" * 16, b"f" * 20
+        result = adapter._fixed_get_audio_key(mgr, gid, file_id)
+        assert result == key
+        assert recorded["cmd"] == b"\x0c"
+        assert recorded["payload"] == file_id + gid + (0).to_bytes(4, "big") + b"\x00\x00"
+        assert mgr._callbacks == {}
+
+    def test_timeout_code_none_callbacks_empty(self):
+        mgr = _make_audio_key_manager_self(timeout=0.01)
+        gid, file_id = b"g" * 16, b"f" * 20
+        with pytest.raises(adapter.AudioKeyError, match="audio key") as exc_info:
+            adapter._fixed_get_audio_key(mgr, gid, file_id)
+        assert exc_info.value.code is None
+        assert mgr._callbacks == {}
+
+    def test_sequential_requests_no_crosstalk(self):
+        key2 = b"\xbb" * 16
+        stale_key = b"\xdd" * 16
+        calls = {"n": 0}
+        captured: dict = {}
+
+        def on_send(_cmd, _payload, callbacks):
+            calls["n"] += 1
+            cb = next(iter(callbacks.values()))
+            if calls["n"] == 1:
+                captured["stale_cb"] = cb
+                return  # deliver nothing → request 1 times out
+            cb.key(key2)
+
+        mgr = _make_audio_key_manager_self(timeout=0.05, on_send=on_send)
+        gid, file_id = b"g" * 16, b"f" * 20
+        with pytest.raises(adapter.AudioKeyError):
+            adapter._fixed_get_audio_key(mgr, gid, file_id)
+        assert mgr._callbacks == {}
+        captured["stale_cb"].key(stale_key)
+        assert adapter._fixed_get_audio_key(mgr, gid, file_id) == key2
+        assert mgr._callbacks == {}
+
+    def test_patch_applies_when_broken_markers_present(self, monkeypatch):
+        _reset_audio_key_patch_state(monkeypatch)
+
+        class DummyAudioKeyManager:
+            @staticmethod
+            def get_audio_key(self, gid, file_id, retry=True):  # noqa: ARG004
+                pass
+
+            class SyncCallback:
+                pass
+
+        _install_dummy_audio_key_module(monkeypatch, DummyAudioKeyManager)
+
+        def fake_getsource(fn):
+            if fn.__name__ == "get_audio_key":
+                return _BROKEN_GET_AUDIO_KEY_SOURCE
+            if fn.__name__ == "SyncCallback":
+                return _BROKEN_SYNC_CALLBACK_SOURCE
+            raise AssertionError(f"unexpected getsource target: {fn}")
+
+        monkeypatch.setattr(inspect, "getsource", fake_getsource)
+        adapter._apply_audio_key_patch()
+        assert DummyAudioKeyManager.get_audio_key is adapter._fixed_get_audio_key
+        assert adapter.audio_key_patch_status() == adapter.PATCH_STATUS_APPLIED
+
+    def test_patch_skips_when_get_audio_key_markers_absent(self, monkeypatch):
+        _reset_audio_key_patch_state(monkeypatch)
+
+        def original_get(self, gid, file_id, retry=True):  # noqa: ARG004
+            pass
+
+        class DummyAudioKeyManager:
+            get_audio_key = original_get
+
+            class SyncCallback:
+                pass
+
+        _install_dummy_audio_key_module(monkeypatch, DummyAudioKeyManager)
+        monkeypatch.setattr(
+            inspect,
+            "getsource",
+            lambda fn: (
+                "def get_audio_key(self):\n    pass\n"
+                if fn.__name__ == "get_audio_key"
+                else _BROKEN_SYNC_CALLBACK_SOURCE
+            ),
+        )
+        adapter._apply_audio_key_patch()
+        assert DummyAudioKeyManager.get_audio_key is original_get
+        assert adapter.audio_key_patch_status() == adapter.PATCH_STATUS_SKIPPED_INCOMPATIBLE
+
+    def test_patch_skips_when_sync_callback_markers_absent(self, monkeypatch):
+        _reset_audio_key_patch_state(monkeypatch)
+
+        def original_get(self, gid, file_id, retry=True):  # noqa: ARG004
+            pass
+
+        class DummyAudioKeyManager:
+            get_audio_key = original_get
+
+            class SyncCallback:
+                pass
+
+        _install_dummy_audio_key_module(monkeypatch, DummyAudioKeyManager)
+        monkeypatch.setattr(
+            inspect,
+            "getsource",
+            lambda fn: (
+                _BROKEN_GET_AUDIO_KEY_SOURCE
+                if fn.__name__ == "get_audio_key"
+                else "class SyncCallback:\n    pass\n"
+            ),
+        )
+        adapter._apply_audio_key_patch()
+        assert DummyAudioKeyManager.get_audio_key is original_get
+        assert adapter.audio_key_patch_status() == adapter.PATCH_STATUS_SKIPPED_INCOMPATIBLE
+
+    @pytest.mark.parametrize(
+        "getsource_exc",
+        [OSError("source code not available"), TypeError("source code not available")],
+    )
+    def test_patch_source_unavailable_on_frozen_build(self, monkeypatch, getsource_exc):
+        _reset_audio_key_patch_state(monkeypatch)
+
+        class DummyAudioKeyManager:
+            @staticmethod
+            def get_audio_key(self, gid, file_id, retry=True):  # noqa: ARG004
+                pass
+
+            class SyncCallback:
+                pass
+
+        _install_dummy_audio_key_module(monkeypatch, DummyAudioKeyManager)
+
+        def raise_getsource(_fn):
+            raise getsource_exc
+
+        monkeypatch.setattr(inspect, "getsource", raise_getsource)
+        adapter._apply_audio_key_patch()
+        assert DummyAudioKeyManager.get_audio_key is adapter._fixed_get_audio_key
+        assert adapter.audio_key_patch_status() == adapter.PATCH_STATUS_SOURCE_UNAVAILABLE
+
+    def test_patch_idempotent(self, monkeypatch):
+        _reset_audio_key_patch_state(monkeypatch)
+
+        class DummyAudioKeyManager:
+            @staticmethod
+            def get_audio_key(self, gid, file_id, retry=True):  # noqa: ARG004
+                pass
+
+            class SyncCallback:
+                pass
+
+        _install_dummy_audio_key_module(monkeypatch, DummyAudioKeyManager)
+        monkeypatch.setattr(
+            inspect,
+            "getsource",
+            lambda fn: (
+                _BROKEN_GET_AUDIO_KEY_SOURCE
+                if fn.__name__ == "get_audio_key"
+                else _BROKEN_SYNC_CALLBACK_SOURCE
+            ),
+        )
+        adapter._apply_audio_key_patch()
+        get_fn = DummyAudioKeyManager.get_audio_key
+        adapter._apply_audio_key_patch()
+        assert DummyAudioKeyManager.get_audio_key is get_fn
+
+
+class TestFetchTrackOggOnThrottle:
+    def test_on_throttle_fires_on_code_2_then_succeeds(self, tmp_path, monkeypatch):
+        dest = tmp_path / "out.ogg"
+        ogg_bytes = b"OggS" + b"audio" * 200
+        attempts = {"n": 0}
+        seen: list = []
+
+        def fake_load(session_raw, tid, quality):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise adapter.AudioKeyError("audio key error, code: 2", code=2)
+            return FakeLoadedStream(ogg_bytes)
+
+        monkeypatch.setattr(adapter, "track_id_from_base62", lambda b: b)
+        monkeypatch.setattr(adapter, "vorbis_quality", lambda name: name)
+        monkeypatch.setattr(adapter, "load_loaded_stream", fake_load)
+
+        def on_throttle():
+            seen.append(None)
+
+        audio.fetch_track_ogg(
+            object(),
+            "base62id",
+            dest=str(dest),
+            cancel=_no_cancel,
+            on_throttle=on_throttle,
+            backoffs=(0, 0, 0),
+            sleep=lambda *_: None,
+        )
+        assert attempts["n"] == 2, f"expected retry, got {attempts['n']} loads"
+        assert seen == [None]
+        assert dest.exists()
+
+    def test_on_throttle_not_fired_for_timeout(self, tmp_path, monkeypatch):
+        dest = tmp_path / "out.ogg"
+        seen: list = []
+
+        def on_throttle():
+            seen.append(None)
+
+        def fake_load(*_a, **_k):
+            raise adapter.AudioKeyError("audio key request timed out", code=None)
+
+        monkeypatch.setattr(adapter, "track_id_from_base62", lambda b: b)
+        monkeypatch.setattr(adapter, "vorbis_quality", lambda name: name)
+        monkeypatch.setattr(adapter, "load_loaded_stream", fake_load)
+
+        with pytest.raises(OggCaptureError):
+            audio.fetch_track_ogg(
+                object(),
+                "base62id",
+                dest=str(dest),
+                cancel=_no_cancel,
+                on_throttle=on_throttle,
+                backoffs=(0, 0, 0),
+                sleep=lambda *_: None,
+            )
+        assert seen == []
+
+    def test_on_throttle_not_fired_for_ioerror(self, tmp_path, monkeypatch):
+        dest = tmp_path / "out.ogg"
+        seen: list = []
+
+        def on_throttle():
+            seen.append(None)
+
+        def fake_load(*_a, **_k):
+            raise OSError("connection reset")
+
+        monkeypatch.setattr(adapter, "track_id_from_base62", lambda b: b)
+        monkeypatch.setattr(adapter, "vorbis_quality", lambda name: name)
+        monkeypatch.setattr(adapter, "load_loaded_stream", fake_load)
+
+        with pytest.raises(OggCaptureError):
+            audio.fetch_track_ogg(
+                object(),
+                "base62id",
+                dest=str(dest),
+                cancel=_no_cancel,
+                on_throttle=on_throttle,
+                backoffs=(0, 0, 0),
+                sleep=lambda *_: None,
+            )
+        assert seen == []
+
+    def test_on_throttle_callback_exception_suppressed(self, tmp_path, monkeypatch):
+        dest = tmp_path / "out.ogg"
+        ogg_bytes = b"OggS" + b"audio" * 200
+        attempts = {"n": 0}
+
+        def fake_load(*_a, **_k):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise adapter.AudioKeyError("audio key error, code: 2", code=2)
+            return FakeLoadedStream(ogg_bytes)
+
+        def boom():
+            raise RuntimeError("callback blew up")
+
+        monkeypatch.setattr(adapter, "track_id_from_base62", lambda b: b)
+        monkeypatch.setattr(adapter, "vorbis_quality", lambda name: name)
+        monkeypatch.setattr(adapter, "load_loaded_stream", fake_load)
+
+        audio.fetch_track_ogg(
+            object(),
+            "base62id",
+            dest=str(dest),
+            cancel=_no_cancel,
+            on_throttle=boom,
+            backoffs=(0, 0, 0),
+            sleep=lambda *_: None,
+        )
+        assert dest.exists()
+
+    def test_on_throttle_fires_when_attempts_exhausted(self, tmp_path, monkeypatch):
+        dest = tmp_path / "out.ogg"
+        seen: list = []
+
+        def on_throttle():
+            seen.append(None)
+
+        def always_throttle(*_a, **_k):
+            raise adapter.AudioKeyError("audio key error, code: 2", code=2)
+
+        monkeypatch.setattr(adapter, "track_id_from_base62", lambda b: b)
+        monkeypatch.setattr(adapter, "vorbis_quality", lambda name: name)
+        monkeypatch.setattr(adapter, "load_loaded_stream", always_throttle)
+
+        with pytest.raises(OggCaptureError):
+            audio.fetch_track_ogg(
+                object(),
+                "base62id",
+                dest=str(dest),
+                cancel=_no_cancel,
+                on_throttle=on_throttle,
+                backoffs=(0, 0, 0),
+                sleep=lambda *_: None,
+            )
+        assert len(seen) >= 1
+
+
+class TestKeyThrottlePacer:
+    def test_baseline_bounds(self):
+        from backends.librespot.pacing import KeyThrottlePacer
+
+        pacer = KeyThrottlePacer(base_jitter_s=(0.4, 1.3))
+        for _ in range(20):
+            delay = pacer.next_delay()
+            assert 0.4 <= delay <= 1.3
+
+    def test_throttle_sets_10_floor(self):
+        from backends.librespot.pacing import THROTTLE_FLOOR_S, KeyThrottlePacer
+
+        pacer = KeyThrottlePacer()
+        assert pacer.note_throttle() == THROTTLE_FLOOR_S
+        assert pacer.is_elevated
+
+    def test_escalation_to_30_cap(self):
+        from backends.librespot.pacing import FLOOR_CAP_S, KeyThrottlePacer
+
+        pacer = KeyThrottlePacer()
+        assert pacer.note_throttle() == 10.0
+        assert pacer.note_throttle() == 15.0
+        assert pacer.note_throttle() == 22.5
+        assert pacer.note_throttle() == FLOOR_CAP_S
+        assert pacer.note_throttle() == FLOOR_CAP_S
+
+    def test_decay_to_zero(self):
+        from backends.librespot.pacing import KeyThrottlePacer
+
+        pacer = KeyThrottlePacer()
+        pacer.note_throttle()
+        assert pacer.note_success() == 5.0
+        assert pacer.note_success() == 2.5
+        assert pacer.note_success() == 1.25
+        assert pacer.note_success() == 0.0
+        assert not pacer.is_elevated
+
+    def test_is_elevated(self):
+        from backends.librespot.pacing import KeyThrottlePacer
+
+        pacer = KeyThrottlePacer()
+        assert not pacer.is_elevated
+        pacer.note_throttle()
+        assert pacer.is_elevated
+        pacer.note_success()
+        pacer.note_success()
+        pacer.note_success()
+        pacer.note_success()
+        assert not pacer.is_elevated
+
+
+class TestBackendPacing:
+    def _backend(self, monkeypatch, *, product="premium", sleep=None):
+        be = LibrespotBackend(_fake_scraper(), sleep=sleep or (lambda _s: None))
+        monkeypatch.setattr(be, "_ensure_session", lambda: _FakeSession(product=product))
+        return be
+
+    def test_pacing_floor_applied_after_throttle(self, tmp_path, monkeypatch):
+        delays: list[float] = []
+        be = self._backend(monkeypatch, sleep=lambda s: delays.append(s))
+        call = {"n": 0}
+
+        def fake_fetch(session_raw, base62, *, dest, cancel, **kwargs):
+            call["n"] += 1
+            if call["n"] == 1:
+                on_throttle = kwargs.get("on_throttle")
+                if on_throttle is not None:
+                    on_throttle()
+            with open(dest, "wb") as f:
+                f.write(b"OggS")
+            return dest
+
+        monkeypatch.setattr(audio, "fetch_track_ogg", fake_fetch)
+        be.fetch(
+            track=_track(),
+            destination=str(tmp_path / "a.mp3"),
+            extended=False,
+            audio_format="mp3",
+            audio_quality="192",
+            cancel=_no_cancel,
+        )
+        delays.clear()
+        be.fetch(
+            track=_track(),
+            destination=str(tmp_path / "b.mp3"),
+            extended=False,
+            audio_format="mp3",
+            audio_quality="192",
+            cancel=_no_cancel,
+        )
+        assert sum(delays) >= 10.0
+
+    def test_clean_fetch_decays_floor(self, tmp_path, monkeypatch):
+        delays: list[float] = []
+        be = self._backend(monkeypatch, sleep=lambda s: delays.append(s))
+        throttled = {"done": False}
+
+        def fake_fetch(session_raw, base62, *, dest, cancel, **kwargs):
+            if not throttled["done"]:
+                on_throttle = kwargs.get("on_throttle")
+                if on_throttle is not None:
+                    on_throttle()
+                throttled["done"] = True
+            with open(dest, "wb") as f:
+                f.write(b"OggS")
+            return dest
+
+        monkeypatch.setattr(audio, "fetch_track_ogg", fake_fetch)
+        be.fetch(
+            track=_track(),
+            destination=str(tmp_path / "a.mp3"),
+            extended=False,
+            audio_format="mp3",
+            audio_quality="192",
+            cancel=_no_cancel,
+        )
+        delays.clear()
+        be.fetch(
+            track=_track(),
+            destination=str(tmp_path / "b.mp3"),
+            extended=False,
+            audio_format="mp3",
+            audio_quality="192",
+            cancel=_no_cancel,
+        )
+        elevated = sum(delays)
+        delays.clear()
+        be.fetch(
+            track=_track(),
+            destination=str(tmp_path / "c.mp3"),
+            extended=False,
+            audio_format="mp3",
+            audio_quality="192",
+            cancel=_no_cancel,
+        )
+        assert sum(delays) < elevated
+
+    def test_status_line_emitted_once(self, tmp_path, monkeypatch, capsys):
+        be = self._backend(monkeypatch)
+        messages: list[str] = []
+        monkeypatch.setattr(be, "_emit", messages.append)
+
+        def fake_fetch(session_raw, base62, *, dest, cancel, **kwargs):
+            on_throttle = kwargs.get("on_throttle")
+            if on_throttle is not None:
+                on_throttle()
+                on_throttle()
+            with open(dest, "wb") as f:
+                f.write(b"OggS")
+            return dest
+
+        monkeypatch.setattr(audio, "fetch_track_ogg", fake_fetch)
+        be.fetch(
+            track=_track(),
+            destination=str(tmp_path / "a.mp3"),
+            extended=False,
+            audio_format="mp3",
+            audio_quality="192",
+            cancel=_no_cancel,
+        )
+        pacing_msgs = [m for m in messages if "rate-limiting audio keys" in m]
+        assert len(pacing_msgs) == 1
+
+    def test_cancel_during_elevated_pacing_returns_promptly(self, tmp_path, monkeypatch):
+        delays: list[float] = []
+        be = self._backend(monkeypatch, sleep=lambda s: delays.append(s))
+        be._served_any = True
+        be._pacer.note_throttle()
+        steps = {"n": 0}
+
+        def cancel():
+            steps["n"] += 1
+            return steps["n"] >= 3
+
+        monkeypatch.setattr(
+            audio,
+            "fetch_track_ogg",
+            lambda *_a, **_k: pytest.fail("must not fetch after cancel during pacing"),
+        )
+        with pytest.raises(LibrespotCancelled):
+            be.fetch(
+                track=_track(),
+                destination=str(tmp_path / "a.mp3"),
+                extended=False,
+                audio_format="mp3",
+                audio_quality="192",
+                cancel=cancel,
+            )
+        assert sum(delays) < 10.0

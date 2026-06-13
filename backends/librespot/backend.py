@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import contextlib
 import os
-import random
 import threading
 import time
 
@@ -24,6 +23,7 @@ from .errors import (
     NoExtendedCutError,
     OggCaptureError,
 )
+from .pacing import KeyThrottlePacer
 from .session import LibrespotSession
 from .webapi import ClientCredentialsToken
 
@@ -51,6 +51,9 @@ class LibrespotBackend:
         self._session: LibrespotSession | None = None
         self._session_lock = threading.Lock()
         self._served_any = False
+        self._pacer = KeyThrottlePacer(base_jitter_s=self.INTER_TRACK_JITTER_S)
+        self._fetch_throttled = False
+        self._pacing_announced = False
         # Rich Spotify metadata (album, clean artists, track/disc number, cover)
         # captured from the LoadedStream.track protobuf on the last native fetch — the
         # album the spotifydown embed lacks. The seam reads this after fetch() to
@@ -130,6 +133,7 @@ class LibrespotBackend:
             # natively (used_extended stays False, so the file isn't mislabeled).
 
         try:
+            self._fetch_throttled = False
             final_path = audio.fetch_track_ogg(
                 session.raw,
                 base62,
@@ -137,7 +141,10 @@ class LibrespotBackend:
                 cancel=cancel,
                 on_status=self._emit,
                 on_metadata=self._capture_metadata,
+                on_throttle=self._note_throttle,
             )
+            if not self._fetch_throttled:
+                self._pacer.note_success()
         except OggCaptureError:
             raise
         return final_path, "ogg", used_extended
@@ -182,8 +189,7 @@ class LibrespotBackend:
         if not self._served_any:
             self._served_any = True
             return
-        lo, hi = self.INTER_TRACK_JITTER_S
-        delay = random.uniform(lo, hi)
+        delay = self._pacer.next_delay()
         deadline = delay
         step = 0.2
         while deadline > 0:
@@ -191,6 +197,15 @@ class LibrespotBackend:
                 return
             self._sleep(min(step, deadline))
             deadline -= step
+
+    def _note_throttle(self) -> None:
+        self._fetch_throttled = True
+        floor = self._pacer.note_throttle()
+        if not self._pacing_announced:
+            self._pacing_announced = True
+            self._emit(
+                f"Spotify is rate-limiting audio keys; pacing downloads (~{floor:.0f}s between tracks)"
+            )
 
     def _capture_metadata(self, meta: dict | None) -> None:
         """Stash the protobuf metadata from the just-captured stream for the seam."""

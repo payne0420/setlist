@@ -23,8 +23,11 @@ from the goal's illustrative snippets in two load-bearing ways:
 from __future__ import annotations
 
 import inspect
+import io
 import math
 import os
+import queue
+import struct
 import threading
 import time
 from typing import Callable
@@ -70,6 +73,47 @@ _BROKEN_CDN_REQUEST_CHUNK_ANTI_MARKERS = ("except",)
 _BROKEN_CDN_REQUEST_MARKERS = ('"Range": "bytes={}-{}"',)
 _BROKEN_CDN_REQUEST_ANTI_MARKERS = ("timeout",)
 
+# Guard markers for pinned ``AudioKeyManager.get_audio_key`` / ``SyncCallback``.
+_BROKEN_GET_AUDIO_KEY_MARKERS = (
+    "return self.get_audio_key(gid, file_id, False)",
+    "callback = AudioKeyManager.SyncCallback(self)",
+)
+_BROKEN_SYNC_CALLBACK_MARKERS = (
+    "__reference = queue.Queue()",
+    "__reference_lock = threading.Condition()",
+)
+
+_AUDIO_KEY_PATCHED = False
+_AUDIO_KEY_PATCH_STATUS: str | None = None
+_AUDIO_KEY_PATCH_LOCK = threading.Lock()
+
+
+class AudioKeyError(RuntimeError):
+    """Raised by the audio-key patch on throttle (``.code`` set) or timeout (``None``)."""
+
+    def __init__(self, message: str, code: int | None = None):
+        super().__init__(message)
+        self.code = code
+
+
+class _OneShotKeyCallback:
+    """Per-request audio-key waiter with an instance-level queue (no shared state)."""
+
+    def __init__(self) -> None:
+        self._queue: queue.Queue = queue.Queue()
+
+    def key(self, key: bytes) -> None:
+        self._queue.put(("key", key))
+
+    def error(self, code: int) -> None:
+        self._queue.put(("error", code))
+
+    def wait(self, timeout: float):
+        try:
+            return self._queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
 
 def check_availability_patch_status() -> str | None:
     """Patch outcome: ``applied`` | ``skipped_incompatible`` | ``source_unavailable`` | None."""
@@ -79,6 +123,11 @@ def check_availability_patch_status() -> str | None:
 def cdn_robustness_patch_status() -> str | None:
     """Patch outcome: ``applied`` | ``skipped_incompatible`` | ``source_unavailable`` | None."""
     return _CDN_ROBUSTNESS_PATCH_STATUS
+
+
+def audio_key_patch_status() -> str | None:
+    """Patch outcome: ``applied`` | ``skipped_incompatible`` | ``source_unavailable`` | None."""
+    return _AUDIO_KEY_PATCH_STATUS
 
 
 def _fixed_check_availability(self, chunk: int, wait: bool, halted: bool) -> None:
@@ -250,6 +299,83 @@ def _apply_cdn_robustness_patch() -> None:
         _CDN_ROBUSTNESS_PATCHED = True
 
 
+def _fixed_get_audio_key(self, gid: bytes, file_id: bytes, retry: bool = True) -> bytes:
+    """Upstream ``AudioKeyManager.get_audio_key`` with five fixes.
+
+    Transcribed from the pinned librespot commit (``audio/__init__.py`` lines 258-282)
+    except: (1) no internal retry — ``audio.py`` owns all retry/backoff; (2) per-call
+    instance-level queue via :class:`_OneShotKeyCallback` (not the shared class-level
+    ``SyncCallback.__reference``); (3) register the callback **before** ``send``; (4)
+    ``finally: callbacks.pop(seq, None)`` so late responses cannot deliver stale keys;
+    (5) raise :class:`AudioKeyError` on error and timeout (``.code`` is the server code
+    when received, ``None`` on timeout). The class-level ``__callbacks`` dict is left in
+    place — dispatch reads it; the metadata service never requests keys.
+    """
+    from librespot import util
+    from librespot.crypto import Packet
+
+    seq: int
+    with self._AudioKeyManager__seq_holder_lock:
+        seq = self._AudioKeyManager__seq_holder
+        self._AudioKeyManager__seq_holder += 1
+    out = io.BytesIO()
+    out.write(file_id)
+    out.write(gid)
+    out.write(struct.pack(">i", seq))
+    out.write(self._AudioKeyManager__zero_short)
+    out.seek(0)
+    payload = out.read()
+    callback = _OneShotKeyCallback()
+    self._AudioKeyManager__callbacks[seq] = callback
+    try:
+        self._AudioKeyManager__session.send(Packet.Type.request_key, payload)
+        result = callback.wait(self.audio_key_request_timeout)
+        if result is None:
+            raise AudioKeyError(
+                "audio key request timed out (gid: {}, fileId: {})".format(  # noqa: UP032
+                    util.bytes_to_hex(gid), util.bytes_to_hex(file_id)
+                ),
+                code=None,
+            )
+        kind, value = result
+        if kind == "error":
+            raise AudioKeyError("audio key error, code: {}".format(value), code=value)  # noqa: UP032
+        return value
+    finally:
+        self._AudioKeyManager__callbacks.pop(seq, None)
+
+
+def _apply_audio_key_patch() -> None:
+    """Monkeypatch audio-key fetch robustness; idempotent, locked, and source-guarded."""
+    global _AUDIO_KEY_PATCHED, _AUDIO_KEY_PATCH_STATUS
+    if _AUDIO_KEY_PATCHED:
+        return
+    with _AUDIO_KEY_PATCH_LOCK:
+        if _AUDIO_KEY_PATCHED:
+            return
+        from librespot.audio import AudioKeyManager
+
+        try:
+            get_key_source = inspect.getsource(AudioKeyManager.get_audio_key)
+            sync_source = inspect.getsource(AudioKeyManager.SyncCallback)
+        except (OSError, TypeError):
+            AudioKeyManager.get_audio_key = _fixed_get_audio_key
+            _AUDIO_KEY_PATCH_STATUS = PATCH_STATUS_SOURCE_UNAVAILABLE
+            _AUDIO_KEY_PATCHED = True
+            return
+        if not all(marker in get_key_source for marker in _BROKEN_GET_AUDIO_KEY_MARKERS):
+            _AUDIO_KEY_PATCH_STATUS = PATCH_STATUS_SKIPPED_INCOMPATIBLE
+            _AUDIO_KEY_PATCHED = True
+            return
+        if not all(marker in sync_source for marker in _BROKEN_SYNC_CALLBACK_MARKERS):
+            _AUDIO_KEY_PATCH_STATUS = PATCH_STATUS_SKIPPED_INCOMPATIBLE
+            _AUDIO_KEY_PATCHED = True
+            return
+        AudioKeyManager.get_audio_key = _fixed_get_audio_key
+        _AUDIO_KEY_PATCH_STATUS = PATCH_STATUS_APPLIED
+        _AUDIO_KEY_PATCHED = True
+
+
 def is_available() -> bool:
     """True iff the alpha ``librespot`` package and its deps import cleanly.
 
@@ -265,6 +391,7 @@ def is_available() -> bool:
 
             _apply_check_availability_patch()
             _apply_cdn_robustness_patch()
+            _apply_audio_key_patch()
             _AVAILABLE = True
         except BaseException as exc:  # noqa: BLE001 - any import-time failure disables it
             _AVAILABLE = False
@@ -392,6 +519,7 @@ def load_loaded_stream(session, track_id, quality):
     """
     _apply_check_availability_patch()
     _apply_cdn_robustness_patch()
+    _apply_audio_key_patch()
     return session.content_feeder().load(track_id, quality, False, None)
 
 
