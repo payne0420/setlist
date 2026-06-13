@@ -4,8 +4,8 @@
 #   brew install --cask setlist
 
 cask "setlist" do
-  version "2.2.0"
-  sha256 "6570078a6dd566beaa1e081a3d5ce3b594b86a0c14ecba6a5ef9558c63a77ad9"
+  version "2.3.0"
+  sha256 "89c7a2c98fa124463ebc29508967c0bab33fed609799211378d3bfcb99c1dc71"
 
   url "https://github.com/payne0420/setlist/releases/download/v#{version}/Setlist-macOS.zip"
   name "Setlist"
