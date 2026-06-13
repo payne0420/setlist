@@ -6,7 +6,7 @@ import contextlib
 import os
 import sys
 import threading
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 import requests
@@ -935,9 +935,15 @@ class TestExtendedMixDownload:
 
         assert result == dest
         assert used_extended is False
-        mock_select.assert_any_call(extended_q, 210, prefer_extended=True, source_title=None)
         mock_select.assert_any_call(
-            "ytsearch5:Song Artist audio", 210, prefer_extended=False, source_title=None
+            extended_q, 210, prefer_extended=True, source_title=None, logger=ANY
+        )
+        mock_select.assert_any_call(
+            "ytsearch5:Song Artist audio",
+            210,
+            prefer_extended=False,
+            source_title=None,
+            logger=ANY,
         )
 
     def test_extended_leg_reports_used_extended_true(self, tmp_path):
@@ -3073,3 +3079,267 @@ class TestSpotifydownApiIntegration:
         assert "on_notice" in kwargs
         assert callable(kwargs["on_notice"])
         assert kwargs["on_notice"] is scraper.error_signal.emit
+
+
+class TestYoutubeRateLimitSurvival:
+    """Tests for YouTube rate-limit detection, gate retry, and user knobs."""
+
+    @staticmethod
+    def _scraper(**kw):
+        from Spotify_Downloader import MusicScraper
+
+        return MusicScraper(**kw)
+
+    def test_random_sleep_opts_when_enabled(self, tmp_path):
+        scraper = self._scraper(youtube_random_sleep=True)
+        dest = str(tmp_path / "track.mp3")
+        url = "https://www.youtube.com/watch?v=abc"
+        with (
+            patch("Spotify_Downloader.get_ffmpeg_path", return_value="/usr/bin"),
+            patch.object(scraper, "_select_youtube_match", return_value=url),
+            patch("Spotify_Downloader.YoutubeDL") as mock_ydl,
+            patch("os.path.exists", return_value=True),
+        ):
+            mock_ydl.return_value.__enter__ = MagicMock(return_value=mock_ydl)
+            mock_ydl.return_value.__exit__ = MagicMock(return_value=False)
+            scraper.download_track_audio("test query", dest)
+            opts = mock_ydl.call_args[0][0]
+        assert opts["sleep_interval"] == 10
+        assert opts["max_sleep_interval"] == 20
+        assert opts["sleep_interval_requests"] == 0.75
+
+    def test_random_sleep_opts_absent_when_disabled(self, tmp_path):
+        scraper = self._scraper(youtube_random_sleep=False)
+        dest = str(tmp_path / "track.mp3")
+        url = "https://www.youtube.com/watch?v=abc"
+        with (
+            patch("Spotify_Downloader.get_ffmpeg_path", return_value="/usr/bin"),
+            patch.object(scraper, "_select_youtube_match", return_value=url),
+            patch("Spotify_Downloader.YoutubeDL") as mock_ydl,
+            patch("os.path.exists", return_value=True),
+        ):
+            mock_ydl.return_value.__enter__ = MagicMock(return_value=mock_ydl)
+            mock_ydl.return_value.__exit__ = MagicMock(return_value=False)
+            scraper.download_track_audio("test query", dest)
+            opts = mock_ydl.call_args[0][0]
+        for key in ("sleep_interval", "max_sleep_interval", "sleep_interval_requests"):
+            assert key not in opts
+
+    def test_youtube_max_concurrency_reaches_backend(self):
+        scraper = self._scraper(youtube_max_concurrency=2)
+        assert scraper._backend.max_concurrency == 2
+
+    def test_youtube_max_concurrency_clamps_worker_pool(self, tmp_path):
+        from Spotify_Downloader import MusicScraper
+
+        scraper = MusicScraper(youtube_max_concurrency=2)
+        for sig in (
+            "song_meta",
+            "add_song_meta",
+            "dlprogress_signal",
+            "Resetprogress_signal",
+            "PlaylistID",
+            "song_Album",
+            "PlaylistCompleted",
+            "error_signal",
+            "count_updated",
+        ):
+            setattr(scraper, sig, MagicMock())
+
+        tracks = [TestParallelDownloads()._make_track(f"id{i}", f"Song {i}") for i in range(8)]
+        seen_workers: set[str] = set()
+        barrier = threading.Barrier(2, timeout=5)
+
+        def fake_download(query, dest, **_kw):
+            seen_workers.add(threading.current_thread().name)
+            with contextlib.suppress(threading.BrokenBarrierError):
+                barrier.wait()
+            open(dest, "wb").close()
+            return dest, False
+
+        scraper.download_track_audio = fake_download
+        mock_api = MagicMock()
+        meta = MagicMock()
+        meta.name = "T"
+        meta.owner = "O"
+        meta.cover_url = None
+        mock_api.get_playlist_metadata.return_value = meta
+        mock_api.iter_playlist_tracks.return_value = iter(tracks)
+        scraper.ensure_spotifydown_api = MagicMock(return_value=mock_api)
+        scraper.format_playlist_name = lambda _m: "T"
+
+        scraper.scrape_playlist("https://open.spotify.com/playlist/abc123", str(tmp_path))
+        assert len(seen_workers) == 2
+
+    def test_rate_limit_retries_once_then_succeeds(self, tmp_path):
+        scraper = self._scraper()
+        scraper._yt_rate_gate.COOLDOWN_S = 0.05
+        scraper._yt_rate_gate.SLICE_S = 0.01
+        dest = str(tmp_path / "Song.mp3")
+        url = "https://www.youtube.com/watch?v=abc"
+        download_attempts = 0
+
+        class FakeYdl:
+            def __init__(self, opts):
+                self._opts = opts
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def extract_info(self, _url, download=False):
+                nonlocal download_attempts
+                if not download:
+                    return {"entries": []}
+                download_attempts += 1
+                logger = self._opts.get("logger")
+                if download_attempts == 1:
+                    logger.error(
+                        "This content isn't available, try again later — rate-limited by YouTube"
+                    )
+                    return None
+                return None
+
+        def exists(path):
+            return path == dest and download_attempts >= 2
+
+        with (
+            patch("Spotify_Downloader.get_ffmpeg_path", return_value="/usr/bin"),
+            patch.object(scraper, "_select_youtube_match", return_value=url),
+            patch("Spotify_Downloader.YoutubeDL", FakeYdl),
+            patch("os.path.exists", side_effect=exists),
+        ):
+            result, _ = scraper.download_track_audio("ytsearch1:Song Artist audio", dest)
+        assert result == dest
+        assert download_attempts == 2
+
+    def test_search_leg_rate_limit_retries(self, tmp_path):
+        # Single-query plan, so the ONLY way to reach a second search is the gate
+        # retry loop (not a second query within one outer attempt). The search leg
+        # uses self._opts["logger"] (strict): if production failed to thread the
+        # per-attempt logger into the SEARCH opts, the KeyError is swallowed by
+        # _select_youtube_match, the trip is never recorded, and this test fails
+        # with "no playable audio source" instead of returning the dest.
+        scraper = self._scraper()
+        scraper._yt_rate_gate.COOLDOWN_S = 0.05
+        scraper._yt_rate_gate.SLICE_S = 0.01
+        dest = str(tmp_path / "Song.mp3")
+        search_attempts = 0
+        download_attempts = 0
+
+        class FakeYdl:
+            def __init__(self, opts):
+                self._opts = opts
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def extract_info(self, _url, download=False):
+                nonlocal search_attempts, download_attempts
+                if not download:
+                    search_attempts += 1
+                    logger = self._opts["logger"]  # strict: must be threaded in
+                    if search_attempts == 1:
+                        # Rate-limit surfaces on the SEARCH leg; no candidate.
+                        logger.error(
+                            "This content isn't available, try again later — rate-limited by YouTube"
+                        )
+                        return {"entries": []}
+                    # Second outer attempt (post-cooldown): candidate appears.
+                    return {"entries": [{"id": "abc", "title": "Song Artist", "duration": 200}]}
+                download_attempts += 1
+                return None
+
+        def exists(path):
+            return path == dest and download_attempts >= 1
+
+        with (
+            patch("Spotify_Downloader.get_ffmpeg_path", return_value="/usr/bin"),
+            patch.object(scraper, "_build_youtube_download_plan", return_value=[("q", False)]),
+            patch("Spotify_Downloader.YoutubeDL", FakeYdl),
+            patch("os.path.exists", side_effect=exists),
+        ):
+            result, _ = scraper.download_track_audio("ytsearch1:Song Artist audio", dest)
+        assert result == dest
+        # 2 searches = one per outer attempt (proves the retry loop ran); 1 download
+        # (only the second attempt reached the download leg).
+        assert search_attempts == 2
+        assert download_attempts == 1
+
+    def test_max_hold_cap_terminates_download_loop(self, tmp_path):
+        import time
+
+        scraper = self._scraper()
+        scraper._yt_rate_gate._engaged_at = time.monotonic() - scraper._yt_rate_gate.MAX_HOLD_S - 1
+        dest = str(tmp_path / "Song.mp3")
+        url = "https://www.youtube.com/watch?v=abc"
+        download_attempts = 0
+
+        class FakeYdl:
+            def __init__(self, opts):
+                self._opts = opts
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def extract_info(self, _url, download=False):
+                nonlocal download_attempts
+                if not download:
+                    return None
+                download_attempts += 1
+                logger = self._opts.get("logger")
+                logger.error(
+                    "This content isn't available, try again later — rate-limited by YouTube"
+                )
+                return None
+
+        with (
+            patch("Spotify_Downloader.get_ffmpeg_path", return_value="/usr/bin"),
+            patch.object(scraper, "_select_youtube_match", return_value=url),
+            patch("Spotify_Downloader.YoutubeDL", FakeYdl),
+            patch("os.path.exists", return_value=False),
+            pytest.raises(RuntimeError, match="rate limit persisted"),
+        ):
+            scraper.download_track_audio("ytsearch1:Song Artist audio", dest)
+        assert download_attempts <= 2
+
+    def test_genuine_not_found_raises_without_retry(self, tmp_path):
+        scraper = self._scraper()
+        dest = str(tmp_path / "Song.mp3")
+        url = "https://www.youtube.com/watch?v=missing"
+        download_attempts = 0
+
+        class FakeYdl:
+            def __init__(self, opts):
+                self._opts = opts
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def extract_info(self, _url, download=False):
+                nonlocal download_attempts
+                if download:
+                    download_attempts += 1
+                return None
+
+        with (
+            patch("Spotify_Downloader.get_ffmpeg_path", return_value="/usr/bin"),
+            patch.object(scraper, "_build_youtube_download_plan", return_value=[("q", False)]),
+            patch.object(scraper, "_select_youtube_match", return_value=url),
+            patch("Spotify_Downloader.YoutubeDL", FakeYdl),
+            patch("os.path.exists", return_value=False),
+            pytest.raises(RuntimeError, match="no playable audio source found"),
+        ):
+            scraper.download_track_audio("ytsearch1:Song Artist audio", dest)
+        assert download_attempts == 1

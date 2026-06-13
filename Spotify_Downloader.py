@@ -30,6 +30,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import webbrowser
 
 import requests
@@ -249,6 +250,8 @@ def load_config() -> dict:
         # to yt-dlp DOWNLOAD invocations (never search) to surface the Premium-only
         # ~256 kbps formats (774 Opus / 141 AAC). "" = disabled (anonymous, ~128 kbps).
         "youtube_cookies_file": "",
+        "youtube_max_concurrency": 4,
+        "youtube_random_sleep": False,
     }
     try:
         with open(_config_path(), encoding="utf-8") as f:
@@ -310,6 +313,12 @@ def load_config() -> dict:
             defaults["flac_metadata_source"] = "provider"
         if not isinstance(defaults.get("youtube_cookies_file"), str):
             defaults["youtube_cookies_file"] = ""
+        try:
+            ymc = int(defaults["youtube_max_concurrency"])
+        except (TypeError, ValueError):
+            ymc = 4
+        defaults["youtube_max_concurrency"] = min(4, max(1, ymc))
+        defaults["youtube_random_sleep"] = bool(defaults.get("youtube_random_sleep", False))
         return defaults
     except (OSError, json.JSONDecodeError):
         return defaults
@@ -507,6 +516,114 @@ def _resolve_passthrough_download(base, info, preexisting):
     return max(matches, key=os.path.getmtime)
 
 
+class _YtRateLimitLogger:
+    """yt-dlp logger that flags YouTube session rate-limits and otherwise mirrors
+    output to stderr (preserving the pre-existing console behavior)."""
+
+    _SIGNATURES = (
+        "this content isn't available, try again later",
+        "rate-limited by youtube",
+    )
+
+    def __init__(self):
+        self.tripped = False
+
+    def _scan(self, msg):
+        low = str(msg).lower()
+        if any(sig in low for sig in self._SIGNATURES):
+            self.tripped = True
+            return True
+        return False
+
+    def debug(self, msg):
+        pass
+
+    def info(self, msg):
+        pass
+
+    def warning(self, msg):
+        if not self._scan(msg):
+            print(msg, file=sys.stderr)
+
+    def error(self, msg):
+        # Mirror to stderr unless it's the rate-limit signature (we surface our
+        # own UI notice for that). Matches yt-dlp's default error visibility.
+        if not self._scan(msg):
+            print(msg, file=sys.stderr)
+
+
+class _YouTubeRateLimitGate:
+    """Session-wide pause shared by all YouTube workers when YouTube rate-limits us.
+
+    Mirrors spotifydown_api._SharedRateLimitGate: a shared monotonic deadline that
+    workers poll with a cancel-aware wait. No probe slot, no notify — 'paused' is
+    simply now < until; whichever worker's wait lapses first is the de-facto probe.
+    A trip while already paused does NOT extend the deadline (prevents a livelock
+    ratchet); only a trip after the deadline lapsed (a failed probe) re-arms it.
+    """
+
+    COOLDOWN_S = 300.0  # 5 min between probes
+    SLICE_S = 0.5  # cancel-responsiveness granularity
+    MAX_HOLD_S = 4500.0  # 75 min per-run cap (ban is "up to an hour")
+
+    def __init__(self, cancel_event, emit):
+        self._lock = threading.Lock()
+        self._until = 0.0  # monotonic deadline; 0 => running
+        self._engaged_at = None  # first-trip monotonic, for the cap
+        self._notice_sent = False  # one-time "paused" UI flag
+        self._cancel = cancel_event
+        self._emit = emit  # callable(str) -> None
+
+    def before_attempt(self):
+        """Block while paused. Returns "GO" or "CANCEL"."""
+        while True:
+            fire_notice = False
+            with self._lock:
+                if self._cancel.is_set():
+                    return "CANCEL"
+                now = time.monotonic()
+                if self._engaged_at is not None and now - self._engaged_at > self.MAX_HOLD_S:
+                    return "GO"  # cap reached: stop holding, let it fail/resume-later
+                remaining = self._until - now
+                if remaining <= 0:
+                    return "GO"
+                if not self._notice_sent:
+                    self._notice_sent = True
+                    fire_notice = True
+            if fire_notice:
+                self._emit(
+                    "YouTube rate-limited the session — holding downloads, "
+                    "auto-retrying every ~5 min until it lifts…"
+                )
+            if self._cancel.wait(min(remaining, self.SLICE_S)):
+                return "CANCEL"
+
+    def after_rate_limit(self):
+        """(Re)arm the cooldown. Returns False when the per-run hold cap is exhausted
+        (caller must stop retrying and fail the track), True while still holding."""
+        with self._lock:
+            now = time.monotonic()
+            if self._engaged_at is None:
+                self._engaged_at = now
+            if now - self._engaged_at > self.MAX_HOLD_S:
+                return False
+            if now >= self._until:  # only (re)arm when not already paused
+                self._until = now + self.COOLDOWN_S
+            return True
+
+    def after_clear(self):
+        """A request got through (success or genuine not-found) => ban lifted."""
+        fire = False
+        with self._lock:
+            if self._until != 0.0:
+                self._until = 0.0
+                self._notice_sent = False
+                self._engaged_at = None
+                fire = True
+        if fire:
+            self._emit("YouTube access restored — resuming downloads.")
+
+
 class MusicScraper(QThread):
     PlaylistCompleted = pyqtSignal(str)
     PlaylistID = pyqtSignal(str)
@@ -543,6 +660,8 @@ class MusicScraper(QThread):
         spotify_client_id: str = "",
         spotify_client_secret: str = "",
         youtube_cookies_file: str = "",
+        youtube_max_concurrency: int = 4,
+        youtube_random_sleep: bool = False,
     ):
         super().__init__()
         self.counter = 0  # Initialize counter to zero
@@ -581,6 +700,7 @@ class MusicScraper(QThread):
         self._failed_lock = threading.Lock()
         self._filename_lock = threading.Lock()
         self._manifest_lock = threading.Lock()
+        self._yt_rate_gate = _YouTubeRateLimitGate(self._cancel_event, self.error_signal.emit)
         self._manifest_path: str | None = None
         self._in_flight_files: set[str] = set()
         # Set to True during parallel playlist downloads so workers can suppress
@@ -615,6 +735,8 @@ class MusicScraper(QThread):
         self.spotify_client_id = spotify_client_id or ""
         self.spotify_client_secret = spotify_client_secret or ""
         self.youtube_cookies_file = (youtube_cookies_file or "").strip()
+        self.youtube_max_concurrency = min(4, max(1, int(youtube_max_concurrency)))
+        self.youtube_random_sleep = bool(youtube_random_sleep)
         self._premium_status_reported = False
         self._cookie_warning_sent = False
         self._backend = make_backend(
@@ -660,6 +782,8 @@ class MusicScraper(QThread):
             return f"'{track_title}' is region-locked on the lossless service"
         if "qobuz" in error_text or "tidal" in error_text or "amazon" in error_text:
             return "Lossless resolver unavailable - falling back"
+        if "rate limit persisted" in error_text:
+            return f"'{track_title}' still YouTube-rate-limited — skipped; re-run later to finish"
         if (
             "no video formats" in error_text
             or "no playable audio source" in error_text
@@ -799,7 +923,12 @@ class MusicScraper(QThread):
         return f"ytsearch10:{track_title} {artists} extended"
 
     def _select_youtube_match(
-        self, search_query, expected_duration_s, prefer_extended=False, source_title=None
+        self,
+        search_query,
+        expected_duration_s,
+        prefer_extended=False,
+        source_title=None,
+        logger=None,
     ):
         """Return the best YouTube watch URL for a search, or None.
 
@@ -822,6 +951,10 @@ class MusicScraper(QThread):
             "socket_timeout": 15,
             "concurrent_fragment_downloads": 4,
         }
+        if self.youtube_random_sleep:
+            select_opts["sleep_interval_requests"] = 0.75
+        if logger is not None:
+            select_opts["logger"] = logger
         try:
             with YoutubeDL(select_opts) as ydl:
                 info = ydl.extract_info(search_query, download=False)
@@ -924,78 +1057,112 @@ class MusicScraper(QThread):
             "ignoreerrors": True,
             "postprocessors": [postprocessor],
         }
-
-        cookie_tmp = None
-        if self.youtube_cookies_file:
-            problem = validate_cookies_file(self.youtube_cookies_file)
-            if problem is None:
-                try:
-                    cookie_tmp = _snapshot_cookiefile(self.youtube_cookies_file)
-                except (OSError, RuntimeError):
-                    problem = "file changed or became unreadable"
-            if problem is None:
-                ydl_opts["cookiefile"] = cookie_tmp
-                # web_music is only auto-added for music.youtube.com URLs; Setlist
-                # downloads www.youtube.com watch URLs, so request it explicitly to
-                # surface the Premium-only formats 774/141. "default" keeps yt-dlp's
-                # version-appropriate client list as the fallback.
-                ydl_opts["extractor_args"] = {
-                    "youtube": {"player_client": ["web_music", "default"]}
-                }
-            else:
-                self._warn_cookies_ignored(problem)
+        if self.youtube_random_sleep:
+            ydl_opts["sleep_interval"] = 10
+            ydl_opts["max_sleep_interval"] = 20
+            ydl_opts["sleep_interval_requests"] = 0.75
 
         expected_path = None if passthrough else base + "." + fmt_info["ext"]
 
-        try:
-            # Primary query (widened to 5 results), then a simplified fallback if
-            # the first pass produced nothing. For each, pick the duration-closest
-            # candidate (avoids grabbing the music video / wrong edit) and download
-            # that specific video. Success is decided purely by whether an audio
-            # file landed on disk, so a search with no playable source fails loudly
-            # instead of silently reporting a path that does not exist.
-            too_big = False
-            for query, pe in self._build_youtube_download_plan(search_query, fallback_query):
-                video_url = self._select_youtube_match(
-                    query, expected_duration_s, prefer_extended=pe, source_title=source_title
-                )
-                if not video_url:
-                    continue
-                info = None
-                try:
-                    preexisting = _passthrough_candidates(base) if passthrough else None
-                    with YoutubeDL(ydl_opts) as ydl:
-                        info = ydl.extract_info(video_url, download=True)
-                except Exception:
-                    # Availability/network errors are absorbed by ignoreerrors; the
-                    # file-exists check below is the single source of truth.
-                    pass
-                if passthrough:
-                    final_path = _resolve_passthrough_download(base, info, preexisting)
-                else:
-                    final_path = expected_path if os.path.exists(expected_path) else None
-                if final_path:
-                    # Enforce the optional max file-size cap on the FINAL file. A
-                    # too-large file is the wrong-version signal (e.g. an hour-long
-                    # mix), so discard it and try the next candidate/fallback.
-                    if self.max_track_bytes and os.path.getsize(final_path) > self.max_track_bytes:
-                        too_big = True
-                        with contextlib.suppress(OSError):
-                            os.remove(final_path)
-                        continue
-                    if cookie_tmp:
-                        self._report_premium_status(info)
-                    return final_path, pe
+        tripped_once = False
+        while True:
+            decision = self._yt_rate_gate.before_attempt()
+            if decision == "CANCEL":
+                raise RuntimeError("download cancelled")
 
-            if too_big:
-                raise RuntimeError(
-                    f"track exceeds the {self.max_track_bytes // (1024 * 1024)} MB size limit"
-                )
-            raise RuntimeError("no playable audio source found on YouTube for this track")
-        finally:
-            if cookie_tmp:
-                with contextlib.suppress(OSError):
-                    os.remove(cookie_tmp)
+            logger = _YtRateLimitLogger()
+            attempt_opts = dict(ydl_opts)
+            attempt_opts["logger"] = logger
+            if tripped_once:
+                attempt_opts["concurrent_fragment_downloads"] = 1
+
+            cookie_tmp = None
+            try:
+                if self.youtube_cookies_file:
+                    problem = validate_cookies_file(self.youtube_cookies_file)
+                    if problem is None:
+                        try:
+                            cookie_tmp = _snapshot_cookiefile(self.youtube_cookies_file)
+                        except (OSError, RuntimeError):
+                            problem = "file changed or became unreadable"
+                    if problem is None:
+                        attempt_opts["cookiefile"] = cookie_tmp
+                        # web_music is only auto-added for music.youtube.com URLs; Setlist
+                        # downloads www.youtube.com watch URLs, so request it explicitly to
+                        # surface the Premium-only formats 774/141. "default" keeps yt-dlp's
+                        # version-appropriate client list as the fallback.
+                        attempt_opts["extractor_args"] = {
+                            "youtube": {"player_client": ["web_music", "default"]}
+                        }
+                    else:
+                        self._warn_cookies_ignored(problem)
+
+                # Primary query (widened to 5 results), then a simplified fallback if
+                # the first pass produced nothing. For each, pick the duration-closest
+                # candidate (avoids grabbing the music video / wrong edit) and download
+                # that specific video. Success is decided purely by whether an audio
+                # file landed on disk, so a search with no playable source fails loudly
+                # instead of silently reporting a path that does not exist.
+                too_big = False
+                for query, pe in self._build_youtube_download_plan(search_query, fallback_query):
+                    video_url = self._select_youtube_match(
+                        query,
+                        expected_duration_s,
+                        prefer_extended=pe,
+                        source_title=source_title,
+                        logger=logger,
+                    )
+                    if not video_url:
+                        continue
+                    info = None
+                    try:
+                        preexisting = _passthrough_candidates(base) if passthrough else None
+                        with YoutubeDL(attempt_opts) as ydl:
+                            info = ydl.extract_info(video_url, download=True)
+                    except Exception:
+                        # Availability/network errors are absorbed by ignoreerrors; the
+                        # file-exists check below is the single source of truth.
+                        pass
+                    if passthrough:
+                        final_path = _resolve_passthrough_download(base, info, preexisting)
+                    else:
+                        final_path = expected_path if os.path.exists(expected_path) else None
+                    if final_path:
+                        # Enforce the optional max file-size cap on the FINAL file. A
+                        # too-large file is the wrong-version signal (e.g. an hour-long
+                        # mix), so discard it and try the next candidate/fallback.
+                        if (
+                            self.max_track_bytes
+                            and os.path.getsize(final_path) > self.max_track_bytes
+                        ):
+                            too_big = True
+                            with contextlib.suppress(OSError):
+                                os.remove(final_path)
+                            continue
+                        if cookie_tmp:
+                            self._report_premium_status(info)
+                        self._yt_rate_gate.after_clear()
+                        return final_path, pe
+
+                if logger.tripped:
+                    tripped_once = True
+                    if not self._yt_rate_gate.after_rate_limit():
+                        # Hold cap exhausted: stop retrying so the run can finish; the manifest
+                        # resume picks this track up on a later run once the ban clears.
+                        raise RuntimeError("YouTube rate limit persisted past the cooldown window")
+                    continue
+
+                if too_big:
+                    self._yt_rate_gate.after_clear()
+                    raise RuntimeError(
+                        f"track exceeds the {self.max_track_bytes // (1024 * 1024)} MB size limit"
+                    )
+                self._yt_rate_gate.after_clear()
+                raise RuntimeError("no playable audio source found on YouTube for this track")
+            finally:
+                if cookie_tmp:
+                    with contextlib.suppress(OSError):
+                        os.remove(cookie_tmp)
 
     def _warn_cookies_ignored(self, problem):
         with self._counter_lock:
@@ -1298,6 +1465,9 @@ class MusicScraper(QThread):
                     cancel=self.is_cancelled,
                 )
             except Exception as error_status:
+                if self.is_cancelled():
+                    self._finish_track_ui(ok=False)
+                    return None
                 error_msg = self._get_user_friendly_error(error_status, track_title)
                 self.error_signal.emit(error_msg)
                 print(f"[*] Error downloading '{track_title}': {error_status}")
@@ -1696,6 +1866,8 @@ class ScraperThread(QThread):
         spotify_client_id: str = "",
         spotify_client_secret: str = "",
         youtube_cookies_file: str = "",
+        youtube_max_concurrency: int = 4,
+        youtube_random_sleep: bool = False,
     ):
         super().__init__()
         self.spotify_link = spotify_link
@@ -1721,6 +1893,8 @@ class ScraperThread(QThread):
             spotify_client_id=spotify_client_id,
             spotify_client_secret=spotify_client_secret,
             youtube_cookies_file=youtube_cookies_file,
+            youtube_max_concurrency=youtube_max_concurrency,
+            youtube_random_sleep=youtube_random_sleep,
         )
         # Capture the terminal status string synchronously IN the worker thread.
         # PlaylistCompleted is emitted from run()'s thread; a DirectConnection
@@ -2452,10 +2626,31 @@ class SettingsPanel(QWidget):
         help_lbl.setWordWrap(True)
         help_lbl.setObjectName("subtleLabel")
 
+        self._yt_concurrency_spin = QSpinBox()
+        self._yt_concurrency_spin.setRange(1, 4)
+        self._yt_concurrency_spin.setValue(cfg.get("youtube_max_concurrency", 4))
+        self._yt_concurrency_spin.valueChanged.connect(
+            lambda v: self._save("youtube_max_concurrency", v)
+        )
+
+        self._yt_slow_mode_cb = QCheckBox("Slow mode — add random delays to avoid rate-limits")
+        self._yt_slow_mode_cb.setChecked(bool(cfg.get("youtube_random_sleep", False)))
+        self._yt_slow_mode_cb.toggled.connect(lambda on: self._save("youtube_random_sleep", on))
+
+        rate_limit_help = QLabel(
+            "Downloads auto-pause and resume when YouTube rate-limits the session. "
+            "Slow mode mirrors yt-dlp's -t sleep preset (trades speed for fewer bans)."
+        )
+        rate_limit_help.setWordWrap(True)
+        rate_limit_help.setObjectName("subtleLabel")
+
         card, form = self._card()
         form.addRow("Cookies file", row)
         form.addRow(self._yt_cookies_status_lbl)
         form.addRow(help_lbl)
+        form.addRow("Max parallel downloads", self._yt_concurrency_spin)
+        form.addRow(self._yt_slow_mode_cb)
+        form.addRow(rate_limit_help)
         return card
 
     def _browse_youtube_cookies(self):
@@ -3103,6 +3298,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             spotify_client_id=self._config.get("spotify_client_id", ""),
             spotify_client_secret=self._config.get("spotify_client_secret", ""),
             youtube_cookies_file=self._config.get("youtube_cookies_file", ""),
+            youtube_max_concurrency=self._config.get("youtube_max_concurrency", 4),
+            youtube_random_sleep=self._config.get("youtube_random_sleep", False),
         )
         self.scraper_thread = thread
         self._active_threads.append(thread)  # strong ref until fully finished

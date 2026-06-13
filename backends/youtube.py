@@ -22,6 +22,9 @@ class YouTubeBackend:
 
     def __init__(self, scraper):
         self._scraper = scraper
+        # Per-run user knob (1..4). Overrides the old class default of 4; the
+        # playlist worker-pool clamp in scrape_playlist reads this.
+        self.max_concurrency = min(4, max(1, getattr(scraper, "youtube_max_concurrency", 4)))
 
     def fetch(
         self,

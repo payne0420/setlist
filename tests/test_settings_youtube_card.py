@@ -91,3 +91,37 @@ def test_clearing_field_disables(win, tmp_path):
     panel._yt_cookies_field.setText("")
     panel._save_youtube_cookies()
     assert win._config["youtube_cookies_file"] == ""
+
+
+def test_youtube_concurrency_defaults(win):
+    panel = win.settings_panel
+    assert panel._yt_concurrency_spin.value() == 4
+    assert not panel._yt_slow_mode_cb.isChecked()
+
+
+def test_youtube_concurrency_spin_persists(win):
+    panel = win.settings_panel
+    panel._yt_concurrency_spin.setValue(2)
+    assert win._config["youtube_max_concurrency"] == 2
+
+
+def test_youtube_slow_mode_persists(win):
+    panel = win.settings_panel
+    panel._yt_slow_mode_cb.setChecked(True)
+    assert win._config["youtube_random_sleep"] is True
+
+
+def test_load_config_clamps_youtube_max_concurrency(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.json"
+    cfg.write_text('{"youtube_max_concurrency": 99, "librespot_consented": true}')
+    monkeypatch.setattr(S, "_config_path", lambda: str(cfg))
+    loaded = S.load_config()
+    assert loaded["youtube_max_concurrency"] == 4
+
+    cfg.write_text('{"youtube_max_concurrency": "garbage", "librespot_consented": true}')
+    loaded = S.load_config()
+    assert loaded["youtube_max_concurrency"] == 4
+
+    cfg.write_text('{"youtube_max_concurrency": 0, "librespot_consented": true}')
+    loaded = S.load_config()
+    assert loaded["youtube_max_concurrency"] == 1
