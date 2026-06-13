@@ -3023,3 +3023,53 @@ class TestFallbackChainMetadataSeam:
         scraper._enrich_song_meta(meta, "tid", fresh_fetch=False)
         assert meta["album"] == "Spotify Album"
         lossless._isrc.resolve_metadata.assert_called_once_with("tid")
+
+
+class TestSpotifydownApiIntegration:
+    def test_ensure_spotifydown_api_injects_metadata_resolver(self):
+        from Spotify_Downloader import MusicScraper
+
+        class _FakeMetadataService:
+            def get(self, _id):
+                return {"title": "T", "artists": "A"}
+
+        from spotifydown_api import PlaylistClient
+
+        scraper = MusicScraper()
+        scraper._metadata_service = _FakeMetadataService()
+        client = scraper.ensure_spotifydown_api()
+        assert isinstance(client, PlaylistClient)
+        assert client._embed_api._metadata_resolver.__self__ is scraper._metadata_service
+
+    def test_scrape_playlist_passes_on_notice(self, tmp_path):
+        from unittest.mock import MagicMock
+
+        from Spotify_Downloader import MusicScraper
+
+        scraper = MusicScraper()
+        for sig in (
+            "song_meta",
+            "add_song_meta",
+            "dlprogress_signal",
+            "Resetprogress_signal",
+            "PlaylistID",
+            "song_Album",
+            "PlaylistCompleted",
+            "error_signal",
+        ):
+            setattr(scraper, sig, MagicMock())
+
+        mock_api = MagicMock()
+        meta = MagicMock()
+        meta.track_count = 1
+        mock_api.get_playlist_metadata.return_value = meta
+        mock_api.iter_playlist_tracks.return_value = iter([])
+        scraper.ensure_spotifydown_api = MagicMock(return_value=mock_api)
+        scraper.format_playlist_name = lambda _m: "T"
+
+        scraper.scrape_playlist("https://open.spotify.com/playlist/abc", str(tmp_path))
+
+        _, kwargs = mock_api.iter_playlist_tracks.call_args
+        assert "on_notice" in kwargs
+        assert callable(kwargs["on_notice"])
+        assert kwargs["on_notice"] is scraper.error_signal.emit

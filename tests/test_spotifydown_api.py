@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 
 from spotifydown_api import (
     ExtractionError,
     PlaylistClient,
     PlaylistInfo,
+    RateLimitError,
     SpotifyEmbedAPI,
     TrackInfo,
     detect_spotify_url_type,
@@ -503,3 +507,402 @@ class TestResilientExtraction:
                 api._cached_token = session_data.get("accessToken")
                 break
         assert api._cached_token == "tok_flat"
+
+
+_OVERFLOW_ENTITY = {
+    "name": "Big Playlist",
+    "trackList": [
+        {"uri": "spotify:track:abc123", "title": "T1", "subtitle": "A1", "duration": 180000},
+        {"uri": "spotify:track:def456", "title": "T2", "subtitle": "A2", "duration": 200000},
+    ],
+}
+
+_OVERFLOW_PLAYLIST_DATA = {
+    "props": {"pageProps": {"state": {"data": {"entity": _OVERFLOW_ENTITY}}}}
+}
+
+_SPCLIENT_OVERFLOW = {
+    "length": 150,
+    "contents": {
+        "items": [
+            {"uri": "spotify:track:abc123"},
+            {"uri": "spotify:track:def456"},
+            {"uri": "spotify:track:overflow1"},
+            {"uri": "spotify:track:overflow2"},
+        ]
+    },
+}
+
+_TRACK_EMBED_ENTITY = {
+    "name": "Overflow Track",
+    "artists": [{"name": "Overflow Artist"}],
+    "duration": 210000,
+    "visualIdentity": {"image": [{"url": "https://example.com/cover.jpg", "maxWidth": 300}]},
+    "releaseDate": {"isoString": "2024-01-15T00:00:00Z"},
+    "audioPreview": {"url": "https://preview.example.com/track.mp3"},
+}
+
+_TRACK_EMBED_DATA = {"props": {"pageProps": {"state": {"data": {"entity": _TRACK_EMBED_ENTITY}}}}}
+
+
+class _FakeResponse:
+    def __init__(self, status_code=200, json_data=None, text="", headers=None):
+        self.status_code = status_code
+        self._json = json_data
+        self.text = text
+        self.headers = headers or {}
+
+    def json(self):
+        return self._json
+
+
+def _wire_overflow_playlist(api: SpotifyEmbedAPI) -> None:
+    """Stub playlist embed + spclient so iter_playlist_tracks hits the overflow pool."""
+    api._cached_token = "tok"
+
+    def fake_fetch(url: str) -> dict:
+        if "/embed/playlist/" in url:
+            return _OVERFLOW_PLAYLIST_DATA
+        raise AssertionError(f"unexpected embed fetch: {url}")
+
+    def fake_get(url, **kwargs):
+        if "spclient" in url:
+            return _FakeResponse(200, json_data=_SPCLIENT_OVERFLOW)
+        raise AssertionError(f"unexpected session.get: {url}")
+
+    api._fetch_embed_data = fake_fetch  # type: ignore[assignment]
+    api._session.get = fake_get  # type: ignore[assignment]
+
+
+class TestOverflowMetadataResolver:
+    """Overflow-track metadata: Mercury resolver first, gated anonymous fallback."""
+
+    def test_overflow_tracks_use_resolver_not_embed(self):
+        resolver_meta = {
+            "title": "Resolved Title",
+            "artists": "Resolved Artist",
+            "album": "Resolved Album",
+            "releaseDate": "2024-06-01",
+            "cover": "https://example.com/resolved.jpg",
+            "durationMs": 213000,
+        }
+
+        def resolver(track_id: str):
+            assert track_id.startswith("overflow")
+            return dict(resolver_meta)
+
+        api = SpotifyEmbedAPI(metadata_resolver=resolver)
+
+        def explode_once(url: str) -> dict:
+            if "/embed/track/" in url:
+                raise AssertionError("embed track fetch must not run when resolver succeeds")
+            raise AssertionError(f"unexpected once fetch: {url}")
+
+        api._fetch_embed_data_once = explode_once  # type: ignore[assignment]
+        _wire_overflow_playlist(api)
+
+        overflow_tracks = [
+            t for t in api.iter_playlist_tracks("PLID") if t.id.startswith("overflow")
+        ]
+        assert len(overflow_tracks) == 2
+        for track in overflow_tracks:
+            assert track.id in ("overflow1", "overflow2")
+            assert track.title == "Resolved Title"
+            assert track.artists == "Resolved Artist"
+            assert track.album == "Resolved Album"
+            assert track.release_date == "2024-06-01"
+            assert track.cover_url == "https://example.com/resolved.jpg"
+            assert track.duration_ms == 213000
+            assert track.preview_url is None
+            assert track.raw == resolver_meta
+
+    def test_resolver_miss_falls_back_to_track_embed(self):
+        api = SpotifyEmbedAPI(metadata_resolver=lambda _tid: None)
+
+        def fake_once(url: str) -> dict:
+            if "/embed/track/" in url:
+                return _TRACK_EMBED_DATA
+            raise AssertionError(f"unexpected once fetch: {url}")
+
+        api._fetch_embed_data_once = fake_once  # type: ignore[assignment]
+        _wire_overflow_playlist(api)
+
+        overflow_tracks = [
+            t for t in api.iter_playlist_tracks("PLID") if t.id.startswith("overflow")
+        ]
+        assert len(overflow_tracks) == 2
+        track = overflow_tracks[0]
+        assert track.title == "Overflow Track"
+        assert track.artists == "Overflow Artist"
+        assert track.duration_ms == 210000
+        assert track.cover_url == "https://example.com/cover.jpg"
+        assert track.release_date == "2024-01-15"
+
+    def test_resolver_dict_without_title_or_artists_falls_back(self):
+        api = SpotifyEmbedAPI(metadata_resolver=lambda _tid: {"artists": "X"})
+        api._fetch_embed_data_once = lambda url: (  # type: ignore[assignment]
+            _TRACK_EMBED_DATA if "/embed/track/" in url else (_ for _ in ()).throw(AssertionError())
+        )
+        _wire_overflow_playlist(api)
+        tracks = [t for t in api.iter_playlist_tracks("PLID") if t.id.startswith("overflow")]
+        assert tracks and tracks[0].title == "Overflow Track"
+
+        api2 = SpotifyEmbedAPI(metadata_resolver=lambda _tid: {"title": "Y"})
+        api2._fetch_embed_data_once = api._fetch_embed_data_once  # type: ignore[assignment]
+        _wire_overflow_playlist(api2)
+        tracks2 = [t for t in api2.iter_playlist_tracks("PLID") if t.id.startswith("overflow")]
+        assert tracks2 and tracks2[0].title == "Overflow Track"
+
+    def test_resolver_exception_is_swallowed(self):
+        def boom(_tid):
+            raise RuntimeError("resolver blew up")
+
+        api = SpotifyEmbedAPI(metadata_resolver=boom)
+        api._fetch_embed_data_once = lambda url: (  # type: ignore[assignment]
+            _TRACK_EMBED_DATA if "/embed/track/" in url else (_ for _ in ()).throw(AssertionError())
+        )
+        _wire_overflow_playlist(api)
+        tracks = list(api.iter_playlist_tracks("PLID"))
+        assert len(tracks) == 4  # 2 embed + 2 overflow via fallback
+
+    def test_get_track_prefers_resolver(self):
+        meta = {
+            "title": "Single",
+            "artists": "Artist",
+            "album": "Album",
+            "cover": "https://example.com/cover.jpg",
+        }
+        api = SpotifyEmbedAPI(metadata_resolver=lambda _tid: meta)
+
+        def explode_once(url: str) -> dict:
+            raise AssertionError("embed fetch must not run")
+
+        api._fetch_embed_data_once = explode_once  # type: ignore[assignment]
+        track = api.get_track("trackid")
+        assert track.title == "Single"
+        assert track.artists == "Artist"
+        assert track.album == "Album"
+
+    def test_resolver_without_cover_falls_back_to_embed(self):
+        resolver_meta = {
+            "title": "Mercury Title",
+            "artists": "Mercury Artist",
+            "album": "Mercury Album",
+            "durationMs": 180000,
+        }
+        embed_calls: list[str] = []
+
+        def fake_once(url: str) -> dict:
+            if "/embed/track/" in url:
+                embed_calls.append(url)
+                return _TRACK_EMBED_DATA
+            raise AssertionError(f"unexpected once fetch: {url}")
+
+        api = SpotifyEmbedAPI(metadata_resolver=lambda _tid: dict(resolver_meta))
+        api._fetch_embed_data_once = fake_once  # type: ignore[assignment]
+
+        track = api.get_track("trackid")
+        assert embed_calls == [api._EMBED_TRACK_URL.format(track_id="trackid")]
+        assert track.title == "Overflow Track"
+        assert track.artists == "Overflow Artist"
+        assert track.cover_url == "https://example.com/cover.jpg"
+
+    def test_resolver_without_cover_returned_when_embed_fails(self):
+        resolver_meta = {
+            "title": "Mercury Title",
+            "artists": "Mercury Artist",
+            "album": "Mercury Album",
+            "durationMs": 180000,
+        }
+        api = SpotifyEmbedAPI(metadata_resolver=lambda _tid: dict(resolver_meta))
+
+        def always_429(url: str) -> dict:
+            raise RateLimitError("rate limited", retry_after=0.0)
+
+        api._fetch_track_embed_data = always_429  # type: ignore[assignment]
+
+        track = api.get_track("trackid")
+        assert track.title == "Mercury Title"
+        assert track.artists == "Mercury Artist"
+        assert track.album == "Mercury Album"
+        assert track.cover_url is None
+        assert track.duration_ms == 180000
+
+
+class TestSharedRateLimitGate:
+    def test_gate_trip_honors_retry_after_and_caps(self, monkeypatch):
+        from spotifydown_api import _SharedRateLimitGate
+
+        now = 1000.0
+        monkeypatch.setattr("spotifydown_api.time.monotonic", lambda: now)
+        gate = _SharedRateLimitGate()
+
+        gate.trip(5.0)
+        assert gate.tripped is True
+        assert gate._until == pytest.approx(now + 5.0)
+
+        gate.tripped = False
+        gate.trip(None)
+        assert gate.tripped is True
+        assert gate._until == pytest.approx(now + _SharedRateLimitGate.DEFAULT_COOLDOWN_S)
+
+        gate.tripped = False
+        gate.trip(999.0)
+        assert gate.tripped is True
+        assert gate._until == pytest.approx(now + _SharedRateLimitGate.MAX_COOLDOWN_S)
+
+    def test_gate_wait_returns_false_when_cancelled(self):
+        from spotifydown_api import _SharedRateLimitGate
+
+        gate = _SharedRateLimitGate()
+        gate._until = time.monotonic() + 3600.0
+        cancel = threading.Event()
+        cancel.set()
+        assert gate.wait(cancel) is False
+
+    def test_gate_wait_wakes_blocked_waiter_on_cancel(self):
+        from spotifydown_api import _SharedRateLimitGate
+
+        gate = _SharedRateLimitGate()
+        gate.trip(10.0)
+        cancel = threading.Event()
+        wait_result: list[bool | None] = [None]
+
+        def waiter() -> None:
+            wait_result[0] = gate.wait(cancel)
+
+        start = time.monotonic()
+        thread = threading.Thread(target=waiter)
+        thread.start()
+        time.sleep(0.05)
+        cancel.set()
+        thread.join(timeout=2.0)
+        elapsed = time.monotonic() - start
+
+        assert not thread.is_alive()
+        assert wait_result[0] is False
+        assert elapsed < 1.0
+
+    def test_track_429_trips_gate_and_stops_after_one_retry(self, monkeypatch):
+        import time as time_mod
+
+        api = SpotifyEmbedAPI()
+        get_calls = {"n": 0}
+
+        def fake_get(url, **kwargs):
+            get_calls["n"] += 1
+            return _FakeResponse(429, headers={"Retry-After": "0"})
+
+        api._session.get = fake_get  # type: ignore[assignment]
+        monkeypatch.setattr(
+            time_mod,
+            "sleep",
+            lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not blind-retry 429")),
+        )
+
+        result = api._fetch_track_metadata_anonymous("trackid")
+        assert result is None
+        assert get_calls["n"] == 2
+        assert api._rate_gate.tripped is True
+
+    def test_rate_limit_notice_emitted_once(self, monkeypatch):
+        import time as time_mod
+
+        api = SpotifyEmbedAPI(metadata_resolver=lambda _tid: None)
+        notices: list[str] = []
+
+        def fake_get(url, **kwargs):
+            if "spclient" in url:
+                return _FakeResponse(200, json_data=_SPCLIENT_OVERFLOW)
+            if "/embed/track/" in url:
+                return _FakeResponse(429, headers={"Retry-After": "0"})
+            raise AssertionError(url)
+
+        api._fetch_embed_data = lambda _url: _OVERFLOW_PLAYLIST_DATA  # type: ignore[assignment]
+        api._cached_token = "tok"
+        api._session.get = fake_get  # type: ignore[assignment]
+        monkeypatch.setattr(time_mod, "sleep", lambda *_a, **_k: None)
+
+        list(api.iter_playlist_tracks("PLID", on_notice=notices.append))
+        assert len(notices) == 1
+        assert "rate-limiting" in notices[0].lower()
+
+    def test_rate_limit_notice_resets_between_runs(self, monkeypatch):
+        import time as time_mod
+
+        api = SpotifyEmbedAPI(metadata_resolver=lambda _tid: None)
+        notices: list[str] = []
+
+        def fake_get_run1(url, **kwargs):
+            if "spclient" in url:
+                return _FakeResponse(200, json_data=_SPCLIENT_OVERFLOW)
+            if "/embed/track/" in url:
+                return _FakeResponse(429, headers={"Retry-After": "0"})
+            raise AssertionError(url)
+
+        api._fetch_embed_data = lambda _url: _OVERFLOW_PLAYLIST_DATA  # type: ignore[assignment]
+        api._cached_token = "tok"
+        api._session.get = fake_get_run1  # type: ignore[assignment]
+        monkeypatch.setattr(time_mod, "sleep", lambda *_a, **_k: None)
+
+        list(api.iter_playlist_tracks("PLID", on_notice=notices.append))
+        assert len(notices) == 1
+
+        def fake_get_run2(url, **kwargs):
+            if "spclient" in url:
+                return _FakeResponse(200, json_data=_SPCLIENT_OVERFLOW)
+            if "/embed/track/" in url:
+                return _FakeResponse(200, json_data=_TRACK_EMBED_DATA)
+            raise AssertionError(url)
+
+        api._session.get = fake_get_run2  # type: ignore[assignment]
+        list(api.iter_playlist_tracks("PLID", on_notice=notices.append))
+        assert len(notices) == 1
+
+    def test_generator_close_sets_cancel_event(self):
+        import threading as th
+
+        api = SpotifyEmbedAPI()
+        captured: list[th.Event] = []
+        wait_results: list[bool | None] = []
+        started = th.Event()
+        closed = th.Event()
+
+        def blocking_fetch(track_id: str, cancel_event: th.Event | None = None):
+            if track_id.startswith("overflow"):
+                captured.append(cancel_event)
+                started.set()
+                if cancel_event is not None:
+                    wait_results.append(cancel_event.wait(timeout=2.0))
+            return None
+
+        api._fetch_track_metadata = blocking_fetch  # type: ignore[assignment]
+        _wire_overflow_playlist(api)
+
+        gen = api.iter_playlist_tracks("PLID")
+        collected: list[TrackInfo] = []
+
+        def consume() -> None:
+            try:
+                for track in gen:
+                    collected.append(track)
+            finally:
+                gen.close()
+                closed.set()
+
+        start = time.monotonic()
+        consumer = th.Thread(target=consume, daemon=True)
+        consumer.start()
+        assert started.wait(timeout=2.0)
+        # Consumer is blocked in as_completed until the pool worker unblocks.
+        # finally uses this same Event; set() wakes the worker (what close does).
+        assert captured and captured[0] is not None
+        captured[0].set()
+        assert closed.wait(timeout=2.0)
+        consumer.join(timeout=2.0)
+        elapsed = time.monotonic() - start
+
+        assert captured[0].is_set()
+        assert wait_results
+        assert wait_results[0] is True
+        assert elapsed < 1.5

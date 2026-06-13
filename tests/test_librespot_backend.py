@@ -2276,6 +2276,22 @@ class TestExtractFromProto:
     def test_none_proto_returns_none(self):
         assert track_metadata.extract_from_proto(None) is None
 
+    def test_duration_ms_extracted_when_positive(self):
+        track = _proto_track()
+        track.duration = 213000
+        meta = track_metadata.extract_from_proto(track)
+        assert meta["durationMs"] == 213000
+
+    def test_duration_ms_omitted_when_absent_or_zero(self):
+        track = _proto_track()
+        meta = track_metadata.extract_from_proto(track)
+        assert "durationMs" not in meta
+
+        track_zero = _proto_track()
+        track_zero.duration = 0
+        meta_zero = track_metadata.extract_from_proto(track_zero)
+        assert "durationMs" not in meta_zero
+
 
 class TestLibrespotMetadataService:
     """The YouTube-path metadata resolver: a cached, best-effort, metadata-only fetch."""

@@ -682,7 +682,11 @@ class MusicScraper(QThread):
 
     def ensure_spotifydown_api(self):
         if self.spotifydown_api is None:
-            self.spotifydown_api = PlaylistClient(session=self.session)
+            service = getattr(self, "_metadata_service", None)
+            self.spotifydown_api = PlaylistClient(
+                session=self.session,
+                metadata_resolver=service.get if service is not None else None,
+            )
         return self.spotifydown_api
 
     def sanitize_text(self, text):
@@ -1461,7 +1465,10 @@ class MusicScraper(QThread):
         expected_total = metadata.track_count or 0
         tracks: list = []
         for track in spotify_api.iter_playlist_tracks(
-            playlist_id, content_type=content_type, skip_ids=already_done
+            playlist_id,
+            content_type=content_type,
+            skip_ids=already_done,
+            on_notice=self.error_signal.emit,
         ):
             if self.is_cancelled():
                 break

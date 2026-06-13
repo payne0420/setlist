@@ -13,6 +13,7 @@ from __future__ import annotations
 import functools
 import json
 import re
+import threading
 import time
 import unicodedata
 from collections.abc import Iterator, Sequence
@@ -44,6 +45,64 @@ class ExtractionError(SpotifyDownAPIError):
 
 class RateLimitError(SpotifyDownAPIError):
     """Rate limited by Spotify - should back off before retrying."""
+
+    def __init__(self, message: str, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Seconds from a Retry-After header (numeric form); None for absent/HTTP-date."""
+    if not value:
+        return None
+    try:
+        seconds = float(value.strip())
+    except ValueError:
+        return None
+    return seconds if seconds >= 0 else None
+
+
+_NEVER_CANCELLED = threading.Event()  # for callers without a cancel context (get_track)
+
+
+class _SharedRateLimitGate:
+    """One cooldown shared by every worker hitting the anonymous embed endpoint.
+
+    Spotify 429s on anonymous embed track fetches are not blind-retried per worker:
+    a prior /v1/search retry stampede escalated to a ~24h account ban, so every
+    worker pauses together until the shared cooldown expires (≤2 attempts per track).
+    """
+
+    DEFAULT_COOLDOWN_S = 30.0
+    MAX_COOLDOWN_S = 120.0
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._until = 0.0  # time.monotonic() deadline
+        self.tripped = False  # one-time UI notice flag, read by the iterator
+
+    def trip(self, retry_after: float | None) -> None:
+        delay = retry_after if retry_after is not None else self.DEFAULT_COOLDOWN_S
+        delay = min(delay, self.MAX_COOLDOWN_S)
+        with self._lock:
+            self._until = max(self._until, time.monotonic() + delay)
+            self.tripped = True
+
+    def reset_notice(self) -> None:
+        with self._lock:
+            self.tripped = False
+
+    def wait(self, cancel: threading.Event | None) -> bool:
+        """Block until the cooldown expires. Returns False if cancelled while waiting."""
+        evt = cancel if cancel is not None else _NEVER_CANCELLED
+        while True:
+            with self._lock:
+                remaining = self._until - time.monotonic()
+            if remaining <= 0:
+                return True
+            if evt.wait(remaining):
+                return False
+            # timeout: loop to re-check (deadline may have been extended)
 
 
 def retry_on_network_error(
@@ -129,10 +188,17 @@ class SpotifyEmbedAPI:
     _SPCLIENT_URL = "https://spclient.wg.spotify.com/playlist/v2/playlist/{playlist_id}"
     _NEXT_DATA_PATTERN = re.compile(r'<script id="__NEXT_DATA__"[^>]*>([^<]+)</script>')
 
-    def __init__(self, *, session: requests.Session | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        session: requests.Session | None = None,
+        metadata_resolver: Callable[[str], dict | None] | None = None,
+    ) -> None:
         self._session = session or requests.Session()
         self._cached_token: str | None = None
         self._token_expiry: float = 0
+        self._metadata_resolver = metadata_resolver
+        self._rate_gate = _SharedRateLimitGate()
 
     @staticmethod
     def _deep_find(data: dict, key: str, max_depth: int = 6) -> dict | None:
@@ -178,6 +244,10 @@ class SpotifyEmbedAPI:
             RateLimitError: When rate limited by Spotify (retryable with backoff)
             ExtractionError: When page structure is unexpected (not retryable)
         """
+        return self._fetch_embed_data_once(url)
+
+    def _fetch_embed_data_once(self, url: str) -> dict:
+        """Single attempt to fetch and parse __NEXT_DATA__ from any embed page."""
         try:
             response = self._session.get(url, headers=self._headers(), timeout=30)
         except (requests.Timeout, requests.ConnectionError) as exc:
@@ -186,7 +256,10 @@ class SpotifyEmbedAPI:
             raise SpotifyDownAPIError(f"Failed to fetch embed page: {exc}") from exc
 
         if response.status_code == 429:
-            raise RateLimitError("Rate limited by Spotify - please wait before retrying")
+            raise RateLimitError(
+                "Rate limited by Spotify - please wait before retrying",
+                retry_after=_parse_retry_after(response.headers.get("Retry-After")),
+            )
         if response.status_code in (401, 403):
             raise ExtractionError(
                 f"Access denied (HTTP {response.status_code}) - playlist may be private"
@@ -218,6 +291,12 @@ class SpotifyEmbedAPI:
                 break
 
         return data
+
+    @retry_on_network_error()  # defaults: NetworkError/Timeout/ConnectionError only
+    def _fetch_track_embed_data(self, url: str) -> dict:
+        """Track-embed fetch: transient network errors retry; a 429 escapes
+        immediately to the shared gate - never blind-retried per worker."""
+        return self._fetch_embed_data_once(url)
 
     _ENTITY_PATHS = (
         ("props", "pageProps", "state", "data", "entity"),
@@ -332,6 +411,7 @@ class SpotifyEmbedAPI:
         playlist_id: str,
         content_type: str = "playlist",
         skip_ids: frozenset[str] | set[str] | None = None,
+        on_notice: Callable[[str], None] | None = None,
     ) -> Iterator[TrackInfo]:
         """Iterate over playlist or album tracks.
 
@@ -434,10 +514,14 @@ class SpotifyEmbedAPI:
             # Manual executor lifecycle so GeneratorExit (caller break on cancel)
             # can shut the pool down with cancel_futures=True instead of blocking
             # on ~700 pending HTTP fetches inside the implicit __exit__.
+            self._rate_gate.reset_notice()
             pool = _cf.ThreadPoolExecutor(max_workers=4, thread_name_prefix="setlist-meta")
+            cancel_event = threading.Event()
+            notified = False
             try:
                 future_to_info = {
-                    pool.submit(self._fetch_track_metadata, tid): (tid, uri) for tid, uri in pending
+                    pool.submit(self._fetch_track_metadata, tid, cancel_event): (tid, uri)
+                    for tid, uri in pending
                 }
                 for future in _cf.as_completed(future_to_info):
                     track_id, uri = future_to_info[future]
@@ -459,7 +543,14 @@ class SpotifyEmbedAPI:
                             preview_url=None,
                             raw={"uri": uri},
                         )
+                    if on_notice is not None and not notified and self._rate_gate.tripped:
+                        notified = True
+                        on_notice(
+                            "Spotify is rate-limiting track lookups - continuing slowly. "
+                            "Log in to Spotify in Settings to avoid this."
+                        )
             finally:
+                cancel_event.set()
                 pool.shutdown(wait=False, cancel_futures=True)
 
         except Exception:
@@ -494,12 +585,64 @@ class SpotifyEmbedAPI:
             raw=dict(track),
         )
 
-    def _fetch_track_metadata(self, track_id: str) -> TrackInfo | None:
-        """Fetch metadata for a single track from its embed page."""
-        url = self._EMBED_TRACK_URL.format(track_id=track_id)
-
+    def _track_from_resolver(self, track_id: str) -> TrackInfo | None:
+        """Best-effort TrackInfo from the injected authenticated resolver, or None."""
+        if self._metadata_resolver is None:
+            return None
         try:
-            data = self._fetch_embed_data(url)
+            meta = self._metadata_resolver(track_id)
+        except Exception:
+            return None  # resolver is best-effort by contract; never fail the fetch
+        if not isinstance(meta, dict) or not meta.get("title") or not meta.get("artists"):
+            return None  # both feed the YouTube search query - degraded dicts fall back
+        duration = meta.get("durationMs")
+        return TrackInfo(
+            id=track_id,
+            title=str(meta["title"]),
+            artists=str(meta["artists"]),
+            album=meta.get("album"),
+            release_date=meta.get("releaseDate"),
+            cover_url=meta.get("cover"),
+            duration_ms=int(duration) if duration else None,
+            preview_url=None,
+            raw=dict(meta),
+        )
+
+    def _fetch_track_metadata(
+        self, track_id: str, cancel_event: threading.Event | None = None
+    ) -> TrackInfo | None:
+        """Fetch metadata for a single track, preferring the injected resolver."""
+        info = self._track_from_resolver(track_id)
+        # Coverless Mercury proto must not short-circuit the embed path: the
+        # downloader's cover enrichment depends on get_track returning embed
+        # visualIdentity covers, so only resolver results with a cover skip
+        # the anonymous fallback.
+        if info is not None and info.cover_url:
+            return info
+        anon = self._fetch_track_metadata_anonymous(track_id, cancel_event)
+        if anon is not None:
+            return anon
+        return info  # coverless resolver info still beats a placeholder
+
+    def _fetch_track_metadata_anonymous(
+        self, track_id: str, cancel_event: threading.Event | None = None
+    ) -> TrackInfo | None:
+        """Fetch metadata for a single track from its embed page (anonymous fallback)."""
+        url = self._EMBED_TRACK_URL.format(track_id=track_id)
+        data = None
+        for attempt in (0, 1):  # initial try + ONE coordinated retry after a cooldown
+            if not self._rate_gate.wait(cancel_event):
+                return None  # cancelled while cooling down
+            try:
+                data = self._fetch_track_embed_data(url)
+                break
+            except RateLimitError as exc:
+                self._rate_gate.trip(exc.retry_after)
+                if attempt:
+                    return None
+            except SpotifyDownAPIError:
+                return None
+        try:
             entity = self._extract_entity(data)
         except SpotifyDownAPIError:
             return None
@@ -652,9 +795,12 @@ class PlaylistClient:
         *,
         session: requests.Session | None = None,
         base_urls: Sequence[str] | None = None,  # Ignored - kept for compatibility
+        metadata_resolver: Callable[[str], dict | None] | None = None,
     ) -> None:
         self._session = session or requests.Session()
-        self._embed_api = SpotifyEmbedAPI(session=self._session)
+        self._embed_api = SpotifyEmbedAPI(
+            session=self._session, metadata_resolver=metadata_resolver
+        )
 
     def get_playlist_metadata(
         self, playlist_id: str, content_type: str = "playlist"
@@ -667,6 +813,7 @@ class PlaylistClient:
         playlist_id: str,
         content_type: str = "playlist",
         skip_ids: frozenset[str] | set[str] | None = None,
+        on_notice: Callable[[str], None] | None = None,
     ) -> Iterator[TrackInfo]:
         """Iterate over all playlist or album tracks (`content_type`: playlist | album).
 
@@ -675,7 +822,10 @@ class PlaylistClient:
         already downloaded in a prior run (resume support).
         """
         yield from self._embed_api.iter_playlist_tracks(
-            playlist_id, content_type=content_type, skip_ids=skip_ids
+            playlist_id,
+            content_type=content_type,
+            skip_ids=skip_ids,
+            on_notice=on_notice,
         )
 
     def validate_playlist(self, playlist_id: str) -> bool:

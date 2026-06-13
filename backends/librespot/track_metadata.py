@@ -63,6 +63,10 @@ def extract_from_proto(track) -> dict | None:
     if disc > 0:
         meta["discNumber"] = disc
 
+    duration = _as_int(getattr(track, "duration", 0))
+    if duration > 0:
+        meta["durationMs"] = duration
+
     album = getattr(track, "album", None)
     if album is not None:
         album_name = _clean(getattr(album, "name", ""))
