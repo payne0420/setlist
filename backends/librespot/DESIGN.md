@@ -75,6 +75,19 @@ All claims below were read from that commit's source, not the goal's illustrativ
   `request_chunk` wraps the body in try/except and calls
   `notify_chunk_error(index, exc)` on failure. `request` is a verbatim transcription with
   `timeout=CDN_REQUEST_TIMEOUT_S` `(10, 60)` on the GET.
+  **Audio-key robustness patch:** pinned `AudioKeyManager.get_audio_key` retries once with
+  zero delay on failure (doubling request pressure when throttled), registers the callback
+  after `send` (fast-response race), uses a shared class-level `SyncCallback.__reference`
+  queue (stale keys can leak to the next track), and never removes `__callbacks` entries.
+  We monkeypatch `get_audio_key` onto `AudioKeyManager` from the same call sites, guarded by
+  `inspect.getsource` markers (all-or-nothing; skip on incompatible upstream; on frozen builds
+  where source is unavailable, still apply and record `source_unavailable`). Five deltas:
+  (1) no internal retry — `audio.py` owns all retry/backoff; (2) per-call instance-level
+  queue via `_OneShotKeyCallback`; (3) register callback before send; (4)
+  `finally: callbacks.pop(seq, None)`; (5) raise `AudioKeyError` on error and timeout
+  (`.code` is the server code when received, `None` on timeout). `SyncCallback` and the
+  class-level `__callbacks` dict are left in place — dispatch reads it; the metadata service
+  never requests keys.
   **Recovery semantics:** a failing or timing-out chunk now flows: exception in executor →
   `notify_chunk_error` (increments `retries[i]` first, sets `requested[i]=False`, and only when
   `index == wait_for_chunk` sets `chunk_exception` and wakes the waiter) → the fixed wait
@@ -100,15 +113,18 @@ All claims below were read from that commit's source, not the goal's illustrativ
   chmod 0600), OAuth-or-stored login (delegates to adapter), `is_premium()`, `close()`.
 - `audio.py` — `capture_ogg(stream, dest_tmp, cancel, *, chunk_size=64*1024)`: pure byte pump,
   defensive OggS-trim, returns bytes written. `fetch_track_ogg(session, base62, *, dest, cancel,
-  on_status)`: load at VERY_HIGH, fall back to HIGH, audio-key retry w/ exponential backoff;
-  writes to `dest.tmp` then atomic rename to `dest`. NEVER re-encodes (OGG-only).
+  on_status, on_throttle)`: load at VERY_HIGH, fall back to HIGH, audio-key retry w/ exponential
+  backoff; `on_throttle` signals key-server rate limits to the backend pacer; writes to
+  `dest.tmp` then atomic rename to `dest`. NEVER re-encodes (OGG-only).
 - `search.py` — `find_extended_id(session, *, title, artists, expected_s, max_track_duration_s)`
   and `find_normal_id(...)`: Web-API search, build `{"id","title","duration_s"}` candidates,
   require primary-artist match (reject covers), reject sped-up/remix unless the title itself has
   it, then defer to `track_selectors.select_extended/select_normal`. Returns a base62 id or None.
 - `backend.py` — `LibrespotBackend(scraper)`: `max_concurrency = 1`. `fetch(...)` orchestrates:
   consent/premium already gated in UI; resolve the id (extended search or the pasted id),
-  capture OGG, return `(final_path, "ogg", used_extended)`. Inter-track jitter sleep + cancel.
+  capture OGG, return `(final_path, "ogg", used_extended)`. AIMD inter-track pacing via
+  `KeyThrottlePacer` (floor + jitter; escalates on audio-key throttle, decays on clean fetches)
+  + cancel-aware sleep.
 
 ## fetch() control flow (backend.py)
 
@@ -147,7 +163,8 @@ so the scan is a no-op and never reaches into audio data. Loop terminates on emp
   configured (a silent source swap would be misleading); friendly per-track error, UI also gates.
 - `LibrespotNotPremium` (positively-known free account) — classified "advance" error for the chain.
 - Transient `Failed fetching audio key` / load errors — retry 3x exponential backoff (10s base,
-  30s cap, mirrors Rust ref), then a friendly error via `_get_user_friendly_error`.
+  30s cap, mirrors Rust ref), then a friendly error via `_get_user_friendly_error`. Audio-key
+  throttle (code 2) also raises the AIMD inter-track floor via `on_throttle` → `KeyThrottlePacer`.
 - VERY_HIGH vorbis unavailable for a track -> retry HIGH (still native .ogg). If both unavailable
   -> `OggCaptureError`, another "advance" error for the chain (goal §10.5's graceful degradation,
   now user-ordered instead of hardwired to YouTube).
@@ -159,8 +176,9 @@ so the scan is a no-op and never reaches into audio data. Loop terminates on emp
 ## Threading / cancel
 
 `max_concurrency = 1` (foundation clamps the worker pool). The session is created once and reused
-across tracks in a run (a single account can't safely run parallel native streams). Small jitter
-sleep between tracks (cancel-aware). The read loop polls `cancel` so Stop is responsive (<=3s).
+across tracks in a run (a single account can't safely run parallel native streams). AIMD pacing
+sleep between tracks (cancel-aware; floor escalates on audio-key throttle, decays on clean
+fetches). The read loop polls `cancel` so Stop is responsive (<=3s).
 
 ## Metadata + formats (Spotify_Downloader.py)
 

@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Librespot audio-key throttling** — runtime patch removes upstream's zero-delay internal
+  retry and shared callback state; adaptive AIMD inter-track pacing escalates when Spotify
+  rate-limits audio keys and decays after clean fetches.
+
 ## [2.2.0] - 2026-06-11
 
 Two real lossless/high-bitrate download sources, a redesigned main window, and

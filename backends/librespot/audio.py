@@ -45,8 +45,8 @@ MAX_HEADER_SCAN = 1024
 OGG_PAGE_HEADER_LEN = 27
 MAX_OGG_TRAILER = 4096
 
-# Audio-key/CDN fetches fail transiently ("Failed fetching audio key"); mirror the
-# Rust reference's 3 retries with 10–30s exponential backoff.
+# Audio-key/CDN fetches fail transiently ("Failed fetching audio key"); the wrapper
+# owns ALL key retries with 10–30s exponential backoff (no upstream internal retry).
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_BACKOFFS = (10, 20, 30)
 
@@ -62,6 +62,11 @@ def _is_unavailable(exc: Exception) -> bool:
 def _is_restricted(exc: Exception) -> bool:
     msg = str(exc).lower()
     return "restricted" in msg or "unrecognized" in msg
+
+
+def _is_key_throttle(exc: Exception) -> bool:
+    """Spotify audio-key rate limit (code 2, etc.) — not timeouts (``code is None``)."""
+    return isinstance(exc, adapter.AudioKeyError) and exc.code is not None
 
 
 def _is_transient(exc: Exception) -> bool:
@@ -224,6 +229,7 @@ def fetch_track_ogg(
     cancel: Callable[[], bool],
     on_status: Callable[[str], None] | None = None,
     on_metadata: Callable[[dict | None], None] | None = None,
+    on_throttle: Callable[[], None] | None = None,
     qualities=DEFAULT_QUALITIES,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     backoffs=DEFAULT_BACKOFFS,
@@ -283,6 +289,9 @@ def fetch_track_ogg(
             except Exception as exc:  # noqa: BLE001 - upstream raises broad types
                 last_error = exc
                 _cleanup(tmp)
+                if on_throttle is not None and _is_key_throttle(exc):
+                    with contextlib.suppress(Exception):
+                        on_throttle()
                 if _is_unavailable(exc) or _is_restricted(exc):
                     break  # no point retrying this quality; try the next one
                 if attempt + 1 < max_attempts and _is_transient(exc):
